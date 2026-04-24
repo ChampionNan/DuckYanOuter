@@ -364,3 +364,8 @@ extension_external
 
 test/sql/pragma/output.json
 tools/pythonpkg/duckdb_build/
+
+# own
+*_db
+lsqb*
+*_data
