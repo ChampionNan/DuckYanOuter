@@ -2,13 +2,12 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/types/date.hpp"
-#include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_operations/senary_executor.hpp"
 #include "duckdb/common/vector_operations/septenary_executor.hpp"
 #include "duckdb/function/cast/cast_function_set.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
+#include "duckdb/main/settings.hpp"
 #include "include/icu-casts.hpp"
 #include "include/icu-datefunc.hpp"
 #include "include/icu-datetrunc.hpp"
@@ -57,6 +56,10 @@ BoundCastInfo ICUMakeDate::BindCastToDate(BindCastInput &input, const LogicalTyp
 	if (!input.context) {
 		throw InternalException("Missing context for TIMESTAMPTZ to DATE cast.");
 	}
+	if (Settings::Get<DisableTimestamptzCastsSetting>(*input.context)) {
+		throw BinderException("Casting from TIMESTAMP WITH TIME ZONE to DATE without an explicit time zone "
+		                      "has been disabled  - use \"AT TIME ZONE ...\"");
+	}
 
 	auto cast_data = make_uniq<CastData>(make_uniq<BindData>(*input.context));
 
@@ -80,7 +83,7 @@ struct ICUMakeTimestampTZFunc : public ICUDateFunc {
 		ss -= secs;
 		ss *= Interval::MSECS_PER_SEC;
 		const auto millis = int32_t(ss);
-		int64_t micros = std::round((ss - millis) * Interval::MICROS_PER_MSEC);
+		int64_t micros = LossyNumericCast<int64_t, double>(std::round((ss - millis) * Interval::MICROS_PER_MSEC));
 
 		calendar->set(UCAL_YEAR, year);
 		calendar->set(UCAL_MONTH, month);
@@ -122,15 +125,13 @@ struct ICUMakeTimestampTZFunc : public ICUDateFunc {
 			auto &tz_vec = input.data.back();
 			if (tz_vec.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 				if (ConstantVector::IsNull(tz_vec)) {
-					result.SetVectorType(VectorType::CONSTANT_VECTOR);
-					ConstantVector::SetNull(result, true);
-				} else {
-					SetTimeZone(calendar, *ConstantVector::GetData<string_t>(tz_vec));
-					SenaryExecutor::Execute<T, T, T, T, T, double, timestamp_t>(
-					    input, result, [&](T yyyy, T mm, T dd, T hr, T mn, double ss) {
-						    return Operation<T>(calendar, yyyy, mm, dd, hr, mn, ss);
-					    });
+					throw InternalException("ICUMakeTimestamp called with constant NULL tz");
 				}
+				SetTimeZone(calendar, *ConstantVector::GetData<string_t>(tz_vec));
+				SenaryExecutor::Execute<T, T, T, T, T, double, timestamp_t>(
+				    input, result, [&](T yyyy, T mm, T dd, T hr, T mn, double ss) {
+					    return Operation<T>(calendar, yyyy, mm, dd, hr, mn, ss);
+				    });
 			} else {
 				SeptenaryExecutor::Execute<T, T, T, T, T, double, string_t, timestamp_t>(
 				    input, result, [&](T yyyy, T mm, T dd, T hr, T mn, double ss, string_t tz_id) {

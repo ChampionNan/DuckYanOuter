@@ -57,6 +57,8 @@ string ExpressionTypeToString(ExpressionType type) {
 		return "AGGREGATE";
 	case ExpressionType::WINDOW_AGGREGATE:
 		return "WINDOW_AGGREGATE";
+	case ExpressionType::WINDOW_FUNCTION:
+		return "WINDOW_FUNCTION";
 	case ExpressionType::WINDOW_RANK:
 		return "RANK";
 	case ExpressionType::WINDOW_RANK_DENSE:
@@ -147,6 +149,8 @@ string ExpressionTypeToString(ExpressionType type) {
 		return "LAMBDA";
 	case ExpressionType::ARROW:
 		return "ARROW";
+	case ExpressionType::TYPE:
+		return "TYPE";
 	case ExpressionType::BOUND_EXPANDED:
 		return "BOUND_EXPANDED";
 	case ExpressionType::INVALID:
@@ -196,6 +200,8 @@ string ExpressionClassToString(ExpressionClass type) {
 		return "POSITIONAL_REFERENCE";
 	case ExpressionClass::BETWEEN:
 		return "BETWEEN";
+	case ExpressionClass::TYPE:
+		return "TYPE";
 	case ExpressionClass::BOUND_AGGREGATE:
 		return "BOUND_AGGREGATE";
 	case ExpressionClass::BOUND_CASE:

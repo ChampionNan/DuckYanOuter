@@ -1,6 +1,5 @@
 #include "duckdb/storage/table/row_id_column_data.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
-#include "duckdb/storage/table/update_segment.hpp"
 
 namespace duckdb {
 
@@ -10,8 +9,12 @@ RowIdColumnData::RowIdColumnData(BlockManager &block_manager, DataTableInfo &inf
 	stats->statistics.SetHasNoNullFast();
 }
 
+idx_t RowIdColumnData::GetRowStart(ColumnScanState &state) {
+	return state.parent->row_group->GetRowStart();
+}
+
 FilterPropagateResult RowIdColumnData::CheckZonemap(ColumnScanState &state, TableFilter &filter) {
-	auto row_start = state.parent->row_group->GetRowStart();
+	auto row_start = GetRowStart(state);
 	return RowGroup::CheckRowIdFilter(filter, row_start, row_start + count);
 }
 
@@ -37,11 +40,6 @@ void RowIdColumnData::InitializeScanWithOffset(ColumnScanState &state, idx_t row
 
 idx_t RowIdColumnData::Scan(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
                             idx_t scan_count) {
-	return ScanCommitted(vector_index, state, result, true, scan_count);
-}
-
-idx_t RowIdColumnData::ScanCommitted(idx_t vector_index, ColumnScanState &state, Vector &result, bool allow_updates,
-                                     idx_t scan_count) {
 	return ScanCount(state, result, scan_count, 0);
 }
 
@@ -51,7 +49,7 @@ void RowIdColumnData::ScanCommittedRange(idx_t row_group_start, idx_t offset_in_
 }
 
 idx_t RowIdColumnData::ScanCount(ColumnScanState &state, Vector &result, idx_t count, idx_t result_offset) {
-	auto row_start = state.parent->row_group->GetRowStart();
+	auto row_start = GetRowStart(state);
 	if (result_offset != 0) {
 		throw InternalException("RowIdColumnData result_offset must be 0");
 	}
@@ -63,7 +61,7 @@ idx_t RowIdColumnData::ScanCount(ColumnScanState &state, Vector &result, idx_t c
 void RowIdColumnData::Filter(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
                              SelectionVector &sel, idx_t &count, const TableFilter &filter,
                              TableFilterState &filter_state) {
-	auto row_start = state.parent->row_group->GetRowStart();
+	auto row_start = GetRowStart(state);
 	auto current_row = row_start + state.offset_in_column;
 	auto max_count = GetVectorCount(vector_index);
 	state.offset_in_column += max_count;
@@ -80,7 +78,7 @@ void RowIdColumnData::Filter(TransactionData transaction, idx_t vector_index, Co
 	// Generate row ids
 	// Create sequence for row ids
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<row_t>(result);
+	auto result_data = FlatVector::ScatterWriter<row_t>(result);
 	for (size_t sel_idx = 0; sel_idx < count; sel_idx++) {
 		result_data[sel.get_index(sel_idx)] = UnsafeNumericCast<int64_t>(current_row + sel.get_index(sel_idx));
 	}
@@ -98,16 +96,11 @@ void RowIdColumnData::Filter(TransactionData transaction, idx_t vector_index, Co
 
 void RowIdColumnData::Select(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,
                              SelectionVector &sel, idx_t count) {
-	SelectCommitted(vector_index, state, result, sel, count, true);
-}
-
-void RowIdColumnData::SelectCommitted(idx_t vector_index, ColumnScanState &state, Vector &result, SelectionVector &sel,
-                                      idx_t count, bool allow_updates) {
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<row_t>(result);
-	auto row_start = state.parent->row_group->GetRowStart();
+	auto result_data = FlatVector::Writer<row_t>(result, count);
+	auto row_start = GetRowStart(state);
 	for (size_t sel_idx = 0; sel_idx < count; sel_idx++) {
-		result_data[sel_idx] = UnsafeNumericCast<row_t>(row_start + state.offset_in_column + sel.get_index(sel_idx));
+		result_data.WriteValue(UnsafeNumericCast<row_t>(row_start + state.offset_in_column + sel.get_index(sel_idx)));
 	}
 	state.offset_in_column += GetVectorCount(vector_index);
 }
@@ -119,7 +112,7 @@ idx_t RowIdColumnData::Fetch(ColumnScanState &state, row_t row_id, Vector &resul
 void RowIdColumnData::FetchRow(TransactionData transaction, ColumnFetchState &state, const StorageIndex &storage_index,
                                row_t row_id, Vector &result, idx_t result_idx) {
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto data = FlatVector::GetData<row_t>(result);
+	auto data = FlatVector::GetDataMutable<row_t>(result);
 	auto row_start = state.row_group->GetRowStart();
 	data[result_idx] = UnsafeNumericCast<row_t>(row_start) + row_id;
 }
@@ -146,12 +139,12 @@ void RowIdColumnData::RevertAppend(row_t new_count) {
 	throw InternalException("RowIdColumnData cannot be appended to");
 }
 
-void RowIdColumnData::Update(TransactionData transaction, DataTable &data_table, idx_t column_index,
+void RowIdColumnData::Update(TransactionData transaction, DuckTableEntry &table_entry, idx_t column_index,
                              Vector &update_vector, row_t *row_ids, idx_t update_count, idx_t row_group_start) {
 	throw InternalException("RowIdColumnData cannot be updated");
 }
 
-void RowIdColumnData::UpdateColumn(TransactionData transaction, DataTable &data_table,
+void RowIdColumnData::UpdateColumn(TransactionData transaction, DuckTableEntry &table_entry,
                                    const vector<column_t> &column_path, Vector &update_vector, row_t *row_ids,
                                    idx_t update_count, idx_t depth, idx_t row_group_start) {
 	throw InternalException("RowIdColumnData cannot be updated");
@@ -166,7 +159,8 @@ unique_ptr<ColumnCheckpointState> RowIdColumnData::CreateCheckpointState(const R
 	throw InternalException("RowIdColumnData cannot be checkpointed");
 }
 
-unique_ptr<ColumnCheckpointState> RowIdColumnData::Checkpoint(const RowGroup &row_group, ColumnCheckpointInfo &info) {
+unique_ptr<ColumnCheckpointState> RowIdColumnData::Checkpoint(const RowGroup &row_group, ColumnCheckpointInfo &info,
+                                                              const BaseStatistics &old_stats) {
 	throw InternalException("RowIdColumnData cannot be checkpointed");
 }
 

@@ -57,7 +57,7 @@ unique_ptr<PhysicalPlan> PhysicalPlanGenerator::PlanInternal(LogicalOperator &op
 	physical_plan->SetRoot(CreatePlan(op));
 	physical_plan->Root().estimated_cardinality = op.estimated_cardinality;
 
-	auto debug_verify_vector = DBConfig::GetSetting<DebugVerifyVectorSetting>(context);
+	auto debug_verify_vector = Settings::Get<DebugVerifyVectorSetting>(context);
 	if (debug_verify_vector != DebugVectorVerification::NONE) {
 		if (debug_verify_vector != DebugVectorVerification::DICTIONARY_EXPRESSION &&
 		    debug_verify_vector != DebugVectorVerification::VARIANT_VECTOR) {
@@ -142,6 +142,7 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalOperator &op) {
 	case LogicalOperatorType::LOGICAL_CREATE_SCHEMA:
 	case LogicalOperatorType::LOGICAL_CREATE_MACRO:
 	case LogicalOperatorType::LOGICAL_CREATE_TYPE:
+	case LogicalOperatorType::LOGICAL_CREATE_TRIGGER:
 		return CreatePlan(op.Cast<LogicalCreate>());
 	case LogicalOperatorType::LOGICAL_PRAGMA:
 		return CreatePlan(op.Cast<LogicalPragma>());
@@ -183,6 +184,13 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalOperator &op) {
 	}
 	}
 	throw InternalException("Physical plan generator - no plan generated");
+}
+
+ArenaAllocator &PhysicalPlanGenerator::ArenaRef() {
+	if (!physical_plan) {
+		physical_plan = make_uniq<PhysicalPlan>(Allocator::Get(context));
+	}
+	return physical_plan->ArenaRef();
 }
 
 } // namespace duckdb

@@ -48,7 +48,7 @@ ColumnDataAllocator::ColumnDataAllocator(ColumnDataAllocator &other) {
 	case ColumnDataAllocatorType::HYBRID:
 		alloc.buffer_manager = other.alloc.buffer_manager;
 		if (other.managed_result_set.IsValid()) {
-			ResultSetManager::Get(alloc.buffer_manager->GetDatabase()).Add(*this);
+			managed_result_set = ResultSetManager::Get(alloc.buffer_manager->GetDatabase()).Add(*this);
 		}
 		break;
 	case ColumnDataAllocatorType::IN_MEMORY_ALLOCATOR:
@@ -72,7 +72,7 @@ ColumnDataAllocator::~ColumnDataAllocator() {
 		return;
 	}
 	for (auto &block : blocks) {
-		block.GetHandle()->SetDestroyBufferUpon(DestroyBufferUpon::UNPIN);
+		block.GetHandle()->GetMemory().SetDestroyBufferUpon(DestroyBufferUpon::UNPIN);
 	}
 	blocks.clear();
 }
@@ -101,7 +101,8 @@ BufferHandle ColumnDataAllocator::AllocateBlock(idx_t size) {
 	data.SetHandle(managed_result_set, pin.GetBlockHandle());
 	blocks.push_back(std::move(data));
 	if (partition_index.IsValid()) { // Set the eviction queue index logarithmically using RadixBits
-		blocks.back().GetHandle()->SetEvictionQueueIndex(RadixPartitioning::RadixBits(partition_index.GetIndex()));
+		blocks.back().GetHandle()->GetMemory().SetEvictionQueueIndex(
+		    RadixPartitioning::RadixBits(partition_index.GetIndex()));
 	}
 	allocated_size += max_size;
 	return pin;
@@ -228,7 +229,7 @@ void ColumnDataAllocator::UnswizzlePointers(ChunkManagementState &state, Vector 
 	}
 
 	const auto &validity = FlatVector::Validity(result);
-	const auto strings = FlatVector::GetData<string_t>(result);
+	const auto strings = FlatVector::GetDataMutable<string_t>(result);
 
 	// recompute pointers
 	const auto start = NumericCast<idx_t>(v_offset + swizzle_segment.offset);
@@ -255,7 +256,7 @@ void ColumnDataAllocator::UnswizzlePointers(ChunkManagementState &state, Vector 
 }
 
 void ColumnDataAllocator::SetDestroyBufferUponUnpin(uint32_t block_id) {
-	blocks[block_id].GetHandle()->SetDestroyBufferUpon(DestroyBufferUpon::UNPIN);
+	blocks[block_id].GetHandle()->GetMemory().SetDestroyBufferUpon(DestroyBufferUpon::UNPIN);
 }
 
 shared_ptr<DatabaseInstance> ColumnDataAllocator::GetDatabase() const {

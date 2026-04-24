@@ -11,6 +11,8 @@
 
 namespace duckdb {
 
+namespace {
+
 /*
 
   0      2 bytes  magic header  0x1f, 0x8b (\037 \213)
@@ -54,7 +56,7 @@ namespace duckdb {
 
  */
 
-static idx_t GZipConsumeString(QueryContext context, FileHandle &input) {
+idx_t GZipConsumeString(QueryContext context, FileHandle &input) {
 	idx_t size = 1; // terminator
 	char buffer[1];
 	while (input.Read(context, buffer, 1) == 1) {
@@ -123,7 +125,7 @@ void MiniZStreamWrapper::Initialize(QueryContext context, CompressedFile &file, 
 		total_size = 0;
 
 		MiniZStream::InitializeGZIPHeader(gzip_hdr);
-		file.child_handle->Write(gzip_hdr, GZIP_HEADER_MINSIZE);
+		file.child_handle->Write(context, gzip_hdr, GZIP_HEADER_MINSIZE);
 
 		auto ret = mz_deflateInit2(mz_stream_ptr.get(), duckdb_miniz::MZ_DEFAULT_LEVEL, MZ_DEFLATED,
 		                           -MZ_DEFAULT_WINDOW_BITS, 1, 0);
@@ -307,7 +309,11 @@ void MiniZStreamWrapper::Close() {
 	file = nullptr;
 }
 
-class GZipFile : public CompressedFile {
+struct GZipFileSystemHolder {
+	GZipFileSystem gzip_fs;
+};
+
+class GZipFile : private GZipFileSystemHolder, public CompressedFile {
 public:
 	GZipFile(QueryContext context, unique_ptr<FileHandle> child_handle_p, const string &path, bool write)
 	    : CompressedFile(gzip_fs, std::move(child_handle_p), path) {
@@ -316,8 +322,9 @@ public:
 	FileCompressionType GetFileCompressionType() override {
 		return FileCompressionType::GZIP;
 	}
-	GZipFileSystem gzip_fs;
 };
+
+} // namespace
 
 void GZipFileSystem::VerifyGZIPHeader(uint8_t gzip_hdr[], idx_t read_count, optional_ptr<CompressedFile> source_file) {
 	// include the filename in the error message if known

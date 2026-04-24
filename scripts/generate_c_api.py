@@ -84,6 +84,7 @@ ORIGINAL_FUNCTION_GROUP_ORDER = [
     'copy_functions',
     'catalog_interface',
     'logging',
+    'geometry_helpers',
 ]
 
 # The file that forms the base for the header generation
@@ -882,9 +883,9 @@ def create_duckdb_c_ext_h(file, ext_api_version, function_groups, api_struct_def
 	    DUCKDB_CAPI_ENTRY_VISIBILITY DUCKDB_EXTENSION_API bool DUCKDB_EXTENSION_GLUE(DUCKDB_EXTENSION_NAME,_init_c_api)(\
 	    duckdb_extension_info info, struct duckdb_extension_access *access) {\
 		DUCKDB_EXTENSION_API_INIT(info, access, DUCKDB_EXTENSION_API_VERSION_STRING);\
-		duckdb_database db = access->get_database(info);\
+		duckdb_database *db = access->get_database(info);\
 		duckdb_connection conn;\
-		if (duckdb_connect(db, &conn) == DuckDBError) {\
+		if (duckdb_connect(*db, &conn) == DuckDBError) {\
 			access->set_error(info, "Failed to open connection to database");\
 			return false;\
 		}\

@@ -4,16 +4,11 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/likely.hpp"
 #include "duckdb/common/numeric_utils.hpp"
-#include "duckdb/function/compression/compression.hpp"
 #include "duckdb/function/compression_function.hpp"
-#include "duckdb/main/config.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/table/column_data_checkpointer.hpp"
 #include "duckdb/storage/table/column_segment.hpp"
-#include "duckdb/storage/table/scan_state.hpp"
-#include "duckdb/storage/segment/uncompressed.hpp"
 #include "duckdb/common/fast_mem.hpp"
-#include "duckdb/common/bitpacking.hpp"
 
 namespace duckdb {
 
@@ -502,14 +497,14 @@ void RoaringCompressState::Compress<PhysicalType::BOOL>(Vector &input, idx_t cou
 	const bool *src = FlatVector::GetData<bool>(input);
 
 	Vector bitpacked_vector(LogicalType::UBIGINT, count);
-	auto &bitpacked_vector_validity = FlatVector::Validity(bitpacked_vector);
+	auto &bitpacked_vector_validity = FlatVector::ValidityMutable(bitpacked_vector);
 	bitpacked_vector_validity.EnsureWritable();
 	const auto dst = data_ptr_cast(bitpacked_vector_validity.GetData());
 
 	const auto &validity = FlatVector::Validity(input);
 	// Bitpack the booleans, so they can be fed through the current compression code, with the same format as a validity
 	// mask.
-	if (validity.AllValid()) {
+	if (validity.CannotHaveNull()) {
 		BitPackBooleans<true, true>(dst, src, count, &validity, &this->current_segment->stats.statistics);
 	} else {
 		BitPackBooleans<true, false>(dst, src, count, &validity, &this->current_segment->stats.statistics);

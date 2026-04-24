@@ -130,7 +130,7 @@ void WriteData(duckdb_column *column, ColumnDataCollection &source, const vector
 	auto target = (DST *)column->deprecated_data;
 	for (auto &input : source.Chunks(column_ids)) {
 		auto source = FlatVector::GetData<SRC>(input.data[0]);
-		auto &mask = FlatVector::Validity(input.data[0]);
+		auto &mask = FlatVector::ValidityMutable(input.data[0]);
 
 		for (idx_t k = 0; k < input.size(); k++, row++) {
 			if (!mask.RowIsValid(k)) {
@@ -147,6 +147,9 @@ duckdb_state deprecated_duckdb_translate_column(MaterializedQueryResult &result,
 	auto &collection = result.Collection();
 	idx_t row_count = collection.Count();
 	column->deprecated_nullmask = (bool *)duckdb_malloc(sizeof(bool) * collection.Count());
+	if (!column->deprecated_nullmask) {
+		return DuckDBError;
+	}
 
 	auto type_size = GetCTypeSize(column->deprecated_type);
 	if (type_size == 0) {
@@ -159,7 +162,7 @@ duckdb_state deprecated_duckdb_translate_column(MaterializedQueryResult &result,
 	}
 
 	column->deprecated_data = duckdb_malloc(type_size * row_count);
-	if (!column->deprecated_nullmask || !column->deprecated_data) { // LCOV_EXCL_START
+	if (!column->deprecated_data) { // LCOV_EXCL_START
 		// malloc failure
 		return DuckDBError;
 	} // LCOV_EXCL_STOP
@@ -214,6 +217,9 @@ duckdb_state deprecated_duckdb_translate_column(MaterializedQueryResult &result,
 		break;
 	case LogicalTypeId::TIME:
 		WriteData<dtime_t>(column, collection, column_ids);
+		break;
+	case LogicalTypeId::TIME_NS:
+		WriteData<dtime_ns_t>(column, collection, column_ids);
 		break;
 	case LogicalTypeId::TIME_TZ:
 		WriteData<dtime_tz_t>(column, collection, column_ids);

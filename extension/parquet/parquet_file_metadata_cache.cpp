@@ -1,8 +1,19 @@
 #include "parquet_file_metadata_cache.hpp"
+
+#include <memory>
+#include <unordered_map>
+#include <utility>
+
 #include "duckdb/common/enums/cache_validation_mode.hpp"
-#include "duckdb/storage/external_file_cache.hpp"
-#include "duckdb/storage/external_file_cache_util.hpp"
-#include "duckdb/storage/caching_file_system.hpp"
+#include "duckdb/storage/external_file_cache/external_file_cache.hpp"
+#include "duckdb/storage/external_file_cache/external_file_cache_util.hpp"
+#include "duckdb/storage/external_file_cache/caching_file_system.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/shared_ptr_ipp.hpp"
+#include "duckdb/common/types/value.hpp"
+#include "duckdb/common/vector.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 
 namespace duckdb {
 
@@ -21,6 +32,31 @@ string ParquetFileMetadataCache::ObjectType() {
 
 string ParquetFileMetadataCache::GetObjectType() {
 	return ObjectType();
+}
+
+optional_idx ParquetFileMetadataCache::GetEstimatedCacheMemory() const {
+	// Base memory consumption
+	idx_t memory = sizeof(*this);
+
+	if (metadata) {
+		const auto num_cols = metadata->schema.size();
+		memory += sizeof(duckdb_parquet::FileMetaData);
+		memory += num_cols * sizeof(duckdb_parquet::SchemaElement);
+		memory += metadata->row_groups.size() * sizeof(duckdb_parquet::RowGroup) +
+		          num_cols * sizeof(duckdb_parquet::ColumnChunk);
+	}
+	if (geo_metadata) {
+		memory +=
+		    sizeof(GeoParquetFileMetadata) + geo_metadata->GetColumnMeta().size() * sizeof(GeoParquetColumnMetadata);
+	}
+	if (crypto_metadata) {
+		memory += sizeof(FileCryptoMetaData);
+	}
+
+	memory += footer_size;
+	memory += version_tag.size();
+
+	return memory;
 }
 
 bool ParquetFileMetadataCache::IsValid(CachingFileHandle &new_handle) const {

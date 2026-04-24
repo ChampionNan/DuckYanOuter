@@ -1,3 +1,5 @@
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "catch.hpp"
 
 #include "duckdb/common/atomic.hpp"
@@ -120,7 +122,6 @@ private:
 	void lookup(AttachTask &task);
 	void append_internal(AttachTask &task, const bool is_upsert);
 	void append(AttachTask &task);
-	void delete_internal(AttachTask &task);
 	void apply_changes(AttachTask &task);
 	void describe_tbl(AttachTask &task);
 	void checkpoint_db(AttachTask &task);
@@ -267,20 +268,20 @@ void AttachWorker::append_internal(AttachTask &task, bool is_upsert) {
 
 		// int
 		auto &col_ubigint = chunk.data[0];
-		auto data_ubigint = FlatVector::GetData<uint64_t>(col_ubigint);
+		auto data_ubigint = FlatVector::GetDataMutable<uint64_t>(col_ubigint);
 		// varchar
 		auto &col_varchar = chunk.data[1];
-		auto data_varchar = FlatVector::GetData<string_t>(col_varchar);
+		auto data_varchar = FlatVector::GetDataMutable<string_t>(col_varchar);
 		// timestamp
 		auto &col_ts = chunk.data[2];
-		auto data_ts = FlatVector::GetData<timestamp_t>(col_ts);
+		auto data_ts = FlatVector::GetDataMutable<timestamp_t>(col_ts);
 		// struct
 		auto &col_struct = chunk.data[3];
 		auto &data_struct_entries = StructVector::GetEntries(col_struct);
 		auto &entry_ubigint = data_struct_entries[0];
-		auto data_struct_ubigint = FlatVector::GetData<uint64_t>(*entry_ubigint);
+		auto data_struct_ubigint = FlatVector::GetDataMutable<uint64_t>(entry_ubigint);
 		auto &entry_varchar = data_struct_entries[1];
-		auto data_struct_varchar = FlatVector::GetData<string_t>(*entry_varchar);
+		auto data_struct_varchar = FlatVector::GetDataMutable<string_t>(entry_varchar);
 
 		for (idx_t i = 0; i < task.ids.size(); i++) {
 			auto row_idx = task.ids[i];
@@ -288,7 +289,7 @@ void AttachWorker::append_internal(AttachTask &task, bool is_upsert) {
 			data_varchar[i] = StringVector::AddString(col_varchar, to_string(row_idx));
 			data_ts[i] = timestamp_t {static_cast<int64_t>(1000 * (row_idx))};
 			data_struct_ubigint[i] = row_idx;
-			data_struct_varchar[i] = StringVector::AddString(*entry_varchar, to_string(row_idx));
+			data_struct_varchar[i] = StringVector::AddString(entry_varchar, to_string(row_idx));
 		}
 
 		chunk.SetCardinality(task.ids.size());
@@ -321,26 +322,6 @@ void AttachWorker::append(AttachTask &task) {
 
 	append_internal(task, false);
 	db_infos[db_id].tables[tbl_id].size += append_count;
-}
-
-void AttachWorker::delete_internal(AttachTask &task) {
-	auto db_id = task.db_id.GetIndex();
-	auto tbl_id = task.tbl_id.GetIndex();
-	auto &ids = task.ids;
-	auto tbl_str = "tbl_" + to_string(tbl_id);
-
-	string delete_list;
-	for (auto delete_idx : ids) {
-		if (!delete_list.empty()) {
-			delete_list += ", ";
-		}
-		delete_list += "(" + to_string(delete_idx) + ")";
-	}
-	string delete_sql =
-	    StringUtil::Format("WITH ids (id) AS (VALUES %s) DELETE FROM %s.%s.%s AS t USING ids WHERE t.i = ids.id",
-	                       delete_list, getDBName(db_id), DEFAULT_SCHEMA, tbl_str);
-	addLog("q: " + delete_sql);
-	execQuery(delete_sql);
 }
 
 void AttachWorker::apply_changes(AttachTask &task) {
@@ -494,7 +475,7 @@ void AttachWorker::Work() {
 
 			// NOTE: Magic threshold used for debugging slowness in this test.
 			// NOTE Set to a fairly high value for CI purposes.
-			if (elapsed >= 0.5) {
+			if (elapsed >= 1) {
 				Printer::PrintF("Slow task %s - took %lf seconds\n", AttachTaskTypeToString(task.type), elapsed);
 			}
 

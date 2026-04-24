@@ -135,19 +135,17 @@ public:
 private:
 	//-------------------------------- Templated functions --------------------------------//
 	struct UnaryUDFExecutor {
-		template <class INPUT_TYPE, class RESULT_TYPE>
-		static RESULT_TYPE Operation(INPUT_TYPE input, ValidityMask &mask, idx_t idx, void *dataptr) {
-			typedef RESULT_TYPE (*unary_function_t)(INPUT_TYPE);
-			auto udf = (unary_function_t)dataptr;
-			return udf(input);
+		template <class INPUT_TYPE, class RESULT_TYPE, class DATA_TYPE>
+		static RESULT_TYPE Operation(INPUT_TYPE input, ValidityMask &mask, idx_t idx, DATA_TYPE &data) {
+			return data(input);
 		}
 	};
 
 	template <typename TR, typename TA>
 	inline static scalar_function_t CreateUnaryFunction(const string &name, TR (*udf_func)(TA)) {
 		scalar_function_t udf_function = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-			UnaryExecutor::GenericExecute<TA, TR, UnaryUDFExecutor>(input.data[0], result, input.size(),
-			                                                        (void *)udf_func);
+			auto udf = udf_func; // non-const local copy since GenericExecute takes DATA_TYPE &
+			UnaryExecutor::GenericExecute<TA, TR, UnaryUDFExecutor>(input.data[0], result, input.size(), udf);
 		};
 		return udf_function;
 	}
@@ -242,8 +240,8 @@ private:
 		} // LCOV_EXCL_STOP
 
 		scalar_function_t udf_function = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-			UnaryExecutor::GenericExecute<TA, TR, UnaryUDFExecutor>(input.data[0], result, input.size(),
-			                                                        (void *)udf_func);
+			auto udf = udf_func; // non-const local copy since GenericExecute takes DATA_TYPE &
+			UnaryExecutor::GenericExecute<TA, TR, UnaryUDFExecutor>(input.data[0], result, input.size(), udf);
 		};
 		return udf_function;
 	}
@@ -321,6 +319,8 @@ private:
 			return std::is_same<T, date_t>();
 		case LogicalTypeId::TIME:
 			return std::is_same<T, dtime_t>();
+		case LogicalTypeId::TIME_NS:
+			return std::is_same<T, dtime_ns_t>();
 		case LogicalTypeId::TIME_TZ:
 			return std::is_same<T, dtime_tz_t>();
 		case LogicalTypeId::TIMESTAMP:

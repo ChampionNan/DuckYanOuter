@@ -1,6 +1,11 @@
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/function/table/system_functions.hpp"
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/pair.hpp"
+#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
@@ -176,21 +181,18 @@ struct TestVectorSequence {
 		case PhysicalType::STRUCT: {
 			auto &child_entries = StructVector::GetEntries(result);
 			for (auto &child_entry : child_entries) {
-				GenerateVector(info, child_entry->GetType(), *child_entry);
+				GenerateVector(info, child_entry.GetType(), child_entry);
 			}
 			break;
 		}
 		case PhysicalType::LIST: {
 			D_ASSERT(type.id() != LogicalTypeId::MAP);
-			auto data = FlatVector::GetData<list_entry_t>(result);
-			data[0].offset = 0;
-			data[0].length = 2;
-			data[1].offset = 2;
-			data[1].length = 0;
-			data[2].offset = 2;
-			data[2].length = 1;
+			auto data = FlatVector::Writer<list_entry_t>(result, 3);
+			data.WriteValue(list_entry_t(0, 2));
+			data.WriteValue(list_entry_t(2, 0));
+			data.WriteValue(list_entry_t(2, 1));
 
-			GenerateVector(info, ListType::GetChildType(type), ListVector::GetEntry(result));
+			GenerateVector(info, ListType::GetChildType(type), ListVector::GetChildMutable(result));
 			ListVector::SetListSize(result, 3);
 			break;
 		}
@@ -306,12 +308,12 @@ unique_ptr<GlobalTableFunctionState> TestVectorTypesInit(ClientContext &context,
 	TestVectorDictionary::Generate(info);
 	TestVectorSequence::Generate(info);
 	for (auto &entry : result->entries) {
-		entry->Verify();
+		entry->Verify(context.db);
 	}
 	if (bind_data.all_flat) {
 		for (auto &entry : result->entries) {
 			entry->Flatten();
-			entry->Verify();
+			entry->Verify(context.db);
 		}
 	}
 	return std::move(result);
@@ -330,7 +332,7 @@ void TestVectorTypesFunction(ClientContext &context, TableFunctionInput &data_p,
 void TestVectorTypesFun::RegisterFunction(BuiltinFunctions &set) {
 	TableFunction test_vector_types("test_vector_types", {LogicalType::ANY}, TestVectorTypesFunction,
 	                                TestVectorTypesBind, TestVectorTypesInit);
-	test_vector_types.varargs = LogicalType::ANY;
+	test_vector_types.SetVarArgs(LogicalType::ANY);
 	test_vector_types.named_parameters["all_flat"] = LogicalType::BOOLEAN;
 
 	set.AddFunction(std::move(test_vector_types));

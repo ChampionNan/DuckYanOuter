@@ -1,17 +1,11 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/uhugeint.hpp"
-#include "duckdb/common/vector_operations/vector_operations.hpp"
-#include "duckdb/common/operator/comparison_operators.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "core_functions/aggregate/distributive_functions.hpp"
 #include "core_functions/aggregate/holistic_functions.hpp"
-#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
-#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/owning_string_map.hpp"
 #include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/function/aggregate/sort_key_helpers.hpp"
-#include "duckdb/common/algorithm.hpp"
-#include <functional>
 
 // MODE( <expr1> )
 // Returns the most frequent value for the values within expr1.
@@ -44,6 +38,18 @@ struct ModeStandard {
 	static RESULT_TYPE Assign(Vector &result, INPUT_TYPE input) {
 		return RESULT_TYPE(input);
 	}
+
+	static void Destroy(T *mode) {
+	}
+
+	static T *Update(T *mode, const T &key) {
+		if (!mode) {
+			mode = new T(key);
+		}
+		*mode = key;
+
+		return mode;
+	}
 };
 
 struct ModeString {
@@ -59,6 +65,42 @@ struct ModeString {
 	template <class INPUT_TYPE, class RESULT_TYPE>
 	static RESULT_TYPE Assign(Vector &result, INPUT_TYPE input) {
 		return StringVector::AddStringOrBlob(result, input);
+	}
+
+	static void Destroy(string_t *mode) {
+		if (mode && !mode->IsInlined()) {
+			delete[] mode->GetData();
+			mode->SetPointer(nullptr);
+		}
+	}
+
+	static string_t *Update(string_t *mode, const string_t &key) {
+		if (key.IsInlined()) {
+			Destroy(mode);
+			if (!mode) {
+				mode = new string_t(nullptr, 0);
+			}
+			*mode = key;
+			return mode;
+		}
+
+		// non-inlined string, need to allocate space for it somehow
+		const auto len = key.GetSize();
+		char *ptr;
+		if (!mode || mode->GetSize() < len) {
+			// we cannot fit this into the current slot - destroy it and re-allocate
+			Destroy(mode);
+			if (!mode) {
+				mode = new string_t(nullptr, 0);
+			}
+			ptr = new char[len];
+		} else {
+			// this fits into the current slot - take over the pointer
+			ptr = mode->GetDataWriteable();
+		}
+		memcpy(ptr, key.GetData(), len);
+		*mode = string_t(ptr, UnsafeNumericCast<uint32_t>(len));
+		return mode;
 	}
 };
 
@@ -92,6 +134,7 @@ struct ModeState {
 			delete frequency_map;
 		}
 		if (mode) {
+			TYPE_OP::Destroy(mode);
 			delete mode;
 		}
 		if (scan) {
@@ -126,7 +169,7 @@ struct ModeState {
 			D_ASSERT(inputs);
 			inputs->Seek(row_idx, *scan, page);
 			data = FlatVector::GetData<KEY_TYPE>(page.data[0]);
-			validity = &FlatVector::Validity(page.data[0]);
+			validity = &FlatVector::ValidityMutable(page.data[0]);
 		}
 		return RowOffset(row_idx);
 	}
@@ -163,11 +206,7 @@ struct ModeState {
 		if (new_count > count) {
 			valid = true;
 			count = new_count;
-			if (mode) {
-				*mode = key;
-			} else {
-				mode = new KEY_TYPE(key);
-			}
+			Update(key);
 		}
 	}
 
@@ -181,6 +220,10 @@ struct ModeState {
 		if (count == old_count && key == *mode) {
 			valid = false;
 		}
+	}
+
+	void Update(const KEY_TYPE &key) {
+		mode = TYPE_OP::Update(mode, key);
 	}
 
 	typename Counts::const_iterator Scan() const {
@@ -329,8 +372,8 @@ struct ModeFunction : TypedModeFunction<TYPE_OP> {
 		state.InitializePage(partition);
 		const auto &fmask = partition.filter_mask;
 
-		auto rdata = FlatVector::GetData<RESULT_TYPE>(result);
-		auto &rmask = FlatVector::Validity(result);
+		auto rdata = FlatVector::GetDataMutable<RESULT_TYPE>(result);
+		auto &rmask = FlatVector::ValidityMutable(result);
 		auto &prevs = state.prevs;
 		if (prevs.empty()) {
 			prevs.resize(1);
@@ -363,7 +406,7 @@ struct ModeFunction : TypedModeFunction<TYPE_OP> {
 			// Rescan
 			auto highest_frequency = state.Scan();
 			if (highest_frequency != state.frequency_map->end()) {
-				*(state.mode) = highest_frequency->first;
+				state.Update(highest_frequency->first);
 				state.count = highest_frequency->second.count;
 				state.valid = (state.count > 0);
 			}
@@ -457,8 +500,9 @@ AggregateFunction GetModeAggregate(const LogicalType &type) {
 	}
 }
 
-unique_ptr<FunctionData> BindModeAggregate(ClientContext &context, AggregateFunction &function,
-                                           vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> BindModeAggregate(BindAggregateFunctionInput &input) {
+	auto &function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
 	function = GetModeAggregate(arguments[0]->return_type);
 	function.name = "mode";
 	return nullptr;
@@ -558,8 +602,9 @@ AggregateFunction GetEntropyFunction(const LogicalType &type) {
 	}
 }
 
-unique_ptr<FunctionData> BindEntropyAggregate(ClientContext &context, AggregateFunction &function,
-                                              vector<unique_ptr<Expression>> &arguments) {
+unique_ptr<FunctionData> BindEntropyAggregate(BindAggregateFunctionInput &input) {
+	auto &function = input.GetBoundFunction();
+	auto &arguments = input.GetArguments();
 	function = GetEntropyFunction(arguments[0]->return_type);
 	function.name = "entropy";
 	return nullptr;

@@ -3,8 +3,8 @@
 #include "duckdb/execution/operator/helper/physical_explain_analyze.hpp"
 #include "duckdb/execution/operator/scan/physical_column_data_scan.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
-#include "duckdb/main/client_context.hpp"
 #include "duckdb/planner/operator/logical_explain.hpp"
+#include "duckdb/main/settings.hpp"
 
 namespace duckdb {
 
@@ -21,7 +21,7 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalExplain &op) {
 	// Format the plan and set the output of the EXPLAIN.
 	op.physical_plan = plan.ToString(op.explain_format);
 	vector<string> keys, values;
-	switch (ClientConfig::GetConfig(context).explain_output_type) {
+	switch (Settings::Get<ExplainOutputSetting>(context)) {
 	case ExplainOutputType::OPTIMIZED_ONLY:
 		keys = {"logical_opt"};
 		values = {logical_plan_opt};
@@ -44,8 +44,8 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalExplain &op) {
 	DataChunk chunk;
 	chunk.Initialize(allocator, op.types);
 	for (idx_t i = 0; i < keys.size(); i++) {
-		chunk.SetValue(0, chunk.size(), Value(keys[i]));
-		chunk.SetValue(1, chunk.size(), Value(values[i]));
+		chunk.data[0].Append(Value(keys[i]));
+		chunk.data[1].Append(Value(values[i]));
 		chunk.SetCardinality(chunk.size() + 1);
 		if (chunk.size() == STANDARD_VECTOR_SIZE) {
 			collection->Append(chunk);

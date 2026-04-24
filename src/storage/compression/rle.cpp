@@ -223,7 +223,7 @@ struct RLECompressState : public CompressionState {
 	}
 
 	ColumnDataCheckpointData &checkpoint_data;
-	CompressionFunction &function;
+	const CompressionFunction &function;
 	unique_ptr<ColumnSegment> current_segment;
 	BufferHandle handle;
 
@@ -264,7 +264,7 @@ struct RLEScanState : public SegmentScanState {
 		entry_pos = 0;
 		position_in_entry = 0;
 		rle_count_offset = UnsafeNumericCast<uint32_t>(Load<uint64_t>(handle.Ptr() + segment.GetBlockOffset()));
-		D_ASSERT(rle_count_offset <= segment.GetBlockManager().GetBlockSize());
+		D_ASSERT(rle_count_offset <= segment.GetBlockSize());
 	}
 
 	inline void SkipInternal(rle_count_t *index_pointer, idx_t skip_count) {
@@ -293,7 +293,7 @@ struct RLEScanState : public SegmentScanState {
 		position_in_entry = 0;
 	}
 
-	inline bool ExhaustedRun(rle_count_t *index_pointer) {
+	inline bool ExhaustedRun(const rle_count_t *const index_pointer) const {
 		return position_in_entry >= index_pointer[entry_pos];
 	}
 
@@ -338,8 +338,8 @@ static bool CanEmitConstantVector(idx_t position, idx_t run_length, idx_t scan_c
 }
 
 template <class T>
-static void RLEScanConstant(RLEScanState<T> &scan_state, rle_count_t *index_pointer, T *data_pointer, idx_t scan_count,
-                            Vector &result) {
+static void RLEScanConstant(RLEScanState<T> &scan_state, const rle_count_t *const index_pointer,
+                            const T *const data_pointer, idx_t scan_count, Vector &result) {
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	auto result_data = ConstantVector::GetData<T>(result);
 	result_data[0] = data_pointer[scan_state.entry_pos];
@@ -347,7 +347,6 @@ static void RLEScanConstant(RLEScanState<T> &scan_state, rle_count_t *index_poin
 	if (scan_state.ExhaustedRun(index_pointer)) {
 		scan_state.ForwardToNextRun();
 	}
-	return;
 }
 
 template <class T, bool ENTIRE_VECTOR>
@@ -355,9 +354,9 @@ void RLEScanPartialInternal(ColumnSegment &segment, ColumnScanState &state, idx_
                             idx_t result_offset) {
 	auto &scan_state = state.scan_state->Cast<RLEScanState<T>>();
 
-	auto data = scan_state.handle.Ptr() + segment.GetBlockOffset();
-	auto data_pointer = reinterpret_cast<T *>(data + RLEConstants::RLE_HEADER_SIZE);
-	auto index_pointer = reinterpret_cast<rle_count_t *>(data + scan_state.rle_count_offset);
+	const auto data = scan_state.handle.Ptr() + segment.GetBlockOffset();
+	const auto data_pointer = reinterpret_cast<const T *const>(data + RLEConstants::RLE_HEADER_SIZE);
+	const auto index_pointer = reinterpret_cast<const rle_count_t *const>(data + scan_state.rle_count_offset);
 
 	// If we are scanning an entire Vector and it contains only a single run
 	if (CanEmitConstantVector<ENTIRE_VECTOR>(scan_state.position_in_entry, index_pointer[scan_state.entry_pos],
@@ -366,28 +365,24 @@ void RLEScanPartialInternal(ColumnSegment &segment, ColumnScanState &state, idx_
 		return;
 	}
 
-	auto result_data = FlatVector::GetData<T>(result);
-	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetDataMutable<T>(result);
 
-	idx_t result_end = result_offset + scan_count;
+	const idx_t result_end = result_offset + scan_count;
 	while (result_offset < result_end) {
-		rle_count_t run_end = index_pointer[scan_state.entry_pos];
-		idx_t run_count = run_end - scan_state.position_in_entry;
-		idx_t remaining_scan_count = result_end - result_offset;
-		T element = data_pointer[scan_state.entry_pos];
-		if (DUCKDB_UNLIKELY(run_count > remaining_scan_count)) {
-			for (idx_t i = 0; i < remaining_scan_count; i++) {
-				result_data[result_offset + i] = element;
-			}
-			scan_state.position_in_entry += remaining_scan_count;
+		const rle_count_t &run_end = index_pointer[scan_state.entry_pos];
+		const idx_t run_count = run_end - scan_state.position_in_entry;
+		const idx_t remaining = result_end - result_offset;
+		const idx_t to_write = run_count < remaining ? run_count : remaining;
+
+		const T &element = data_pointer[scan_state.entry_pos];
+		std::fill_n(result_data + result_offset, to_write, element);
+
+		result_offset += to_write;
+		scan_state.position_in_entry += to_write;
+
+		if (to_write != run_count) {
 			break;
 		}
-
-		for (idx_t i = 0; i < run_count; i++) {
-			result_data[result_offset + i] = element;
-		}
-
-		result_offset += run_count;
 		scan_state.ForwardToNextRun();
 	}
 }
@@ -421,8 +416,7 @@ void RLESelect(ColumnSegment &segment, ColumnScanState &state, idx_t vector_coun
 		return;
 	}
 
-	auto result_data = FlatVector::GetData<T>(result);
-	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::Writer<T>(result, sel_count);
 
 	idx_t prev_idx = 0;
 	for (idx_t i = 0; i < sel_count; i++) {
@@ -433,7 +427,7 @@ void RLESelect(ColumnSegment &segment, ColumnScanState &state, idx_t vector_coun
 		// skip forward to the next index
 		scan_state.SkipInternal(index_pointer, next_idx - prev_idx);
 		// read the element
-		result_data[i] = data_pointer[scan_state.entry_pos];
+		result_data.WriteValue(data_pointer[scan_state.entry_pos]);
 		// move the next to the prev
 		prev_idx = next_idx;
 	}
@@ -463,7 +457,7 @@ void RLEFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_coun
 		memset(scan_state.matching_runs.get(), 0, sizeof(bool) * total_run_count);
 
 		// execute the filter over all runs at once
-		Vector run_vector(result.GetType(), data_ptr_cast(data_pointer));
+		Vector run_vector(result.GetType(), data_ptr_cast(data_pointer), total_run_count);
 
 		UnifiedVectorFormat run_format;
 		run_vector.ToUnifiedFormat(total_run_count, run_format);
@@ -485,7 +479,7 @@ void RLEFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_coun
 		return;
 	}
 	// scan (the subset of) the matching runs AND set the output selection vector with the rows that match
-	auto result_data = FlatVector::GetData<T>(result);
+	auto result_data = FlatVector::GetDataMutable<T>(result);
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 
 	idx_t matching_count = 0;
@@ -563,7 +557,7 @@ void RLEFetchRow(ColumnSegment &segment, ColumnFetchState &state, row_t row_id, 
 
 	auto data = scan_state.handle.Ptr() + segment.GetBlockOffset();
 	auto data_pointer = reinterpret_cast<T *>(data + RLEConstants::RLE_HEADER_SIZE);
-	auto result_data = FlatVector::GetData<T>(result);
+	auto result_data = FlatVector::GetDataMutable<T>(result);
 	result_data[result_idx] = data_pointer[scan_state.entry_pos];
 }
 

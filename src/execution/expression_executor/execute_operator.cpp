@@ -49,7 +49,7 @@ void ExpressionExecutor::Execute(const BoundOperatorExpression &expr, Expression
 				intermediate.Reference(comp_res);
 			} else {
 				// otherwise OR together
-				Vector new_result(LogicalType::BOOLEAN, true, false);
+				Vector new_result(LogicalType::BOOLEAN);
 				VectorOperations::Or(intermediate, comp_res, new_result, count);
 				intermediate.Reference(new_result);
 			}
@@ -75,15 +75,12 @@ void ExpressionExecutor::Execute(const BoundOperatorExpression &expr, Expression
 			Execute(*expr.children[child], state->child_states[child].get(), current_sel, remaining_count,
 			        vector_to_check);
 
-			UnifiedVectorFormat vdata;
-			vector_to_check.ToUnifiedFormat(remaining_count, vdata);
-
+			auto entries = vector_to_check.Validity(remaining_count);
 			idx_t result_count = 0;
 			next_count = 0;
 			for (idx_t i = 0; i < remaining_count; i++) {
 				auto base_idx = current_sel ? current_sel->get_index(i) : i;
-				auto idx = vdata.sel->get_index(i);
-				if (vdata.validity.RowIsValid(idx)) {
+				if (entries.IsValid(i)) {
 					slice_sel.set_index(result_count, i);
 					result_sel.set_index(result_count++, base_idx);
 				} else {
@@ -113,8 +110,14 @@ void ExpressionExecutor::Execute(const BoundOperatorExpression &expr, Expression
 		}
 	} else if (expression_type == ExpressionType::OPERATOR_TRY) {
 		auto &child_state = *state->child_states[0];
+		Vector try_result(result.GetType());
 		try {
-			Execute(*expr.children[0], &child_state, sel, count, result);
+			Execute(*expr.children[0], &child_state, sel, count, try_result);
+			if (try_result.GetVectorType() == VectorType::CONSTANT_VECTOR) {
+				result.Reference(try_result);
+				return;
+			}
+			VectorOperations::Copy(try_result, result, count, 0, 0);
 			return;
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
@@ -123,12 +126,19 @@ void ExpressionExecutor::Execute(const BoundOperatorExpression &expr, Expression
 				throw;
 			}
 		}
+
+		// On error, evaluate per row
 		SelectionVector selvec(1);
 		DataChunk intermediate;
 		intermediate.Initialize(GetAllocator(), {result.GetType()}, 1);
 		for (idx_t i = 0; i < count; i++) {
 			intermediate.Reset();
 			intermediate.SetCardinality(1);
+
+			// Make sure to clear any dictionary states in the child expression, so that it actually
+			// gets executed anew for every row
+			child_state.ResetDictionaryStates();
+
 			selvec.set_index(0, sel ? sel->get_index(i) : i);
 			Value val(result.GetType());
 			try {

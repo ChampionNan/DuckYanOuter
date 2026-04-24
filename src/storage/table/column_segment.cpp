@@ -1,21 +1,27 @@
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/storage/table/column_segment.hpp"
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/null_value.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/config.hpp"
-#include "duckdb/main/database.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
-#include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/prefix_range_filter.hpp"
 #include "duckdb/planner/filter/struct_filter.hpp"
+#include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/data_pointer.hpp"
-#include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/table/append_state.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
-#include "duckdb/storage/table/update_segment.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 #include "duckdb/planner/filter/bloom_filter.hpp"
-#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/perfect_hash_join_filter.hpp"
 #include "duckdb/planner/filter/selectivity_optional_filter.hpp"
 
 #include <cstring>
@@ -33,20 +39,20 @@ unique_ptr<ColumnSegment> ColumnSegment::CreatePersistentSegment(DatabaseInstanc
                                                                  BaseStatistics statistics,
                                                                  unique_ptr<ColumnSegmentState> segment_state) {
 	auto &config = DBConfig::GetConfig(db);
-	optional_ptr<CompressionFunction> function;
 	shared_ptr<BlockHandle> block;
 
-	function = config.GetCompressionFunction(compression_type, type.InternalType());
+	auto function = config.GetCompressionFunction(compression_type, type.InternalType());
 	if (block_id != INVALID_BLOCK) {
 		block = block_manager.RegisterBlock(block_id);
 	}
 
 	auto segment_size = block_manager.GetBlockSize();
-	return make_uniq<ColumnSegment>(db, std::move(block), type, ColumnSegmentType::PERSISTENT, count, *function,
+	return make_uniq<ColumnSegment>(db, std::move(block), type, ColumnSegmentType::PERSISTENT, count, function,
 	                                std::move(statistics), block_id, offset, segment_size, std::move(segment_state));
 }
 
-unique_ptr<ColumnSegment> ColumnSegment::CreateTransientSegment(DatabaseInstance &db, CompressionFunction &function,
+unique_ptr<ColumnSegment> ColumnSegment::CreateTransientSegment(DatabaseInstance &db,
+                                                                const CompressionFunction &function,
                                                                 const LogicalType &type, const idx_t segment_size,
                                                                 BlockManager &block_manager) {
 	// Allocate a buffer for the uncompressed segment.
@@ -62,9 +68,10 @@ unique_ptr<ColumnSegment> ColumnSegment::CreateTransientSegment(DatabaseInstance
 // Construct/Destruct
 //===--------------------------------------------------------------------===//
 ColumnSegment::ColumnSegment(DatabaseInstance &db, shared_ptr<BlockHandle> block_p, const LogicalType &type,
-                             const ColumnSegmentType segment_type, const idx_t count, CompressionFunction &function_p,
-                             BaseStatistics statistics, const block_id_t block_id_p, const idx_t offset,
-                             const idx_t segment_size_p, const unique_ptr<ColumnSegmentState> segment_state_p)
+                             const ColumnSegmentType segment_type, const idx_t count,
+                             const CompressionFunction &function_p, BaseStatistics statistics,
+                             const block_id_t block_id_p, const idx_t offset, const idx_t segment_size_p,
+                             const unique_ptr<ColumnSegmentState> segment_state_p)
 
     : SegmentBase<ColumnSegment>(count), db(db), type(type), type_size(GetTypeIdSize(type.InternalType())),
       segment_type(segment_type), stats(std::move(statistics)), block(std::move(block_p)), function(function_p),
@@ -74,7 +81,7 @@ ColumnSegment::ColumnSegment(DatabaseInstance &db, shared_ptr<BlockHandle> block
 	}
 
 	// For constant segments (CompressionType::COMPRESSION_CONSTANT) the block is a nullptr.
-	D_ASSERT(!block || segment_size <= GetBlockManager().GetBlockSize());
+	D_ASSERT(!block || segment_size <= GetBlockSize());
 }
 
 ColumnSegment::ColumnSegment(ColumnSegment &other)
@@ -83,7 +90,7 @@ ColumnSegment::ColumnSegment(ColumnSegment &other)
       block(std::move(other.block)), function(other.function), block_id(other.block_id), offset(other.offset),
       segment_size(other.segment_size), segment_state(std::move(other.segment_state)) {
 	// For constant segments (CompressionType::COMPRESSION_CONSTANT) the block is a nullptr.
-	D_ASSERT(!block || segment_size <= GetBlockManager().GetBlockSize());
+	D_ASSERT(!block || segment_size <= GetBlockSize());
 }
 
 ColumnSegment::~ColumnSegment() {
@@ -169,7 +176,7 @@ idx_t ColumnSegment::SegmentSize() const {
 void ColumnSegment::Resize(idx_t new_size) {
 	D_ASSERT(new_size > segment_size);
 	D_ASSERT(offset == 0);
-	D_ASSERT(block && new_size <= GetBlockManager().GetBlockSize());
+	D_ASSERT(block && new_size <= GetBlockSize());
 
 	auto &buffer_manager = BufferManager::GetBufferManager(db);
 	auto old_handle = buffer_manager.Pin(block);
@@ -240,7 +247,7 @@ void ColumnSegment::ConvertToPersistent(QueryContext context, optional_ptr<Block
 	// Thus, we set the compression function to constant and reset the block buffer.
 	D_ASSERT(stats.statistics.IsConstant());
 	auto &config = DBConfig::GetConfig(db);
-	function = *config.GetCompressionFunction(CompressionType::COMPRESSION_CONSTANT, type.InternalType());
+	function = config.GetCompressionFunction(CompressionType::COMPRESSION_CONSTANT, type.InternalType());
 	block.reset();
 }
 
@@ -289,16 +296,16 @@ void ColumnSegment::VisitBlockIds(BlockIdVisitor &visitor) const {
 // Filter Selection
 //===--------------------------------------------------------------------===//
 template <class T, class OP, bool HAS_NULL>
-static idx_t TemplatedFilterSelection(UnifiedVectorFormat &vdata, T predicate, SelectionVector &sel,
-                                      idx_t approved_tuple_count, SelectionVector &result_sel) {
+static idx_t TemplatedFilterSelection(const UnifiedVectorFormat &vdata, T predicate, const SelectionVector &sel,
+                                      const idx_t approved_tuple_count, SelectionVector &result_sel) {
 	auto &mask = vdata.validity;
-	auto vec = UnifiedVectorFormat::GetData<T>(vdata);
+	const auto vec = UnifiedVectorFormat::GetData<const T>(vdata);
 	idx_t result_count = 0;
 	for (idx_t i = 0; i < approved_tuple_count; i++) {
-		auto idx = sel.get_index(i);
+		const auto idx = sel.get_index(i);
 		auto vector_idx = vdata.sel->get_index(idx);
 		bool comparison_result =
-		    (!HAS_NULL || mask.RowIsValid(vector_idx)) && OP::Operation(vec[vector_idx], predicate);
+		    (!HAS_NULL || mask.RowIsValidUnsafe(vector_idx)) && OP::Operation(vec[vector_idx], predicate);
 		result_sel.set_index(result_count, idx);
 		result_count += comparison_result;
 	}
@@ -313,7 +320,7 @@ static void FilterSelectionSwitch(UnifiedVectorFormat &vdata, T predicate, Selec
 	// the inplace loops take the result as the last parameter
 	switch (comparison_type) {
 	case ExpressionType::COMPARE_EQUAL: {
-		if (mask.AllValid()) {
+		if (mask.CannotHaveNull()) {
 			approved_tuple_count =
 			    TemplatedFilterSelection<T, Equals, false>(vdata, predicate, sel, approved_tuple_count, new_sel);
 		} else {
@@ -323,7 +330,7 @@ static void FilterSelectionSwitch(UnifiedVectorFormat &vdata, T predicate, Selec
 		break;
 	}
 	case ExpressionType::COMPARE_NOTEQUAL: {
-		if (mask.AllValid()) {
+		if (mask.CannotHaveNull()) {
 			approved_tuple_count =
 			    TemplatedFilterSelection<T, NotEquals, false>(vdata, predicate, sel, approved_tuple_count, new_sel);
 		} else {
@@ -333,7 +340,7 @@ static void FilterSelectionSwitch(UnifiedVectorFormat &vdata, T predicate, Selec
 		break;
 	}
 	case ExpressionType::COMPARE_LESSTHAN: {
-		if (mask.AllValid()) {
+		if (mask.CannotHaveNull()) {
 			approved_tuple_count =
 			    TemplatedFilterSelection<T, LessThan, false>(vdata, predicate, sel, approved_tuple_count, new_sel);
 		} else {
@@ -343,7 +350,7 @@ static void FilterSelectionSwitch(UnifiedVectorFormat &vdata, T predicate, Selec
 		break;
 	}
 	case ExpressionType::COMPARE_GREATERTHAN: {
-		if (mask.AllValid()) {
+		if (mask.CannotHaveNull()) {
 			approved_tuple_count =
 			    TemplatedFilterSelection<T, GreaterThan, false>(vdata, predicate, sel, approved_tuple_count, new_sel);
 		} else {
@@ -353,7 +360,7 @@ static void FilterSelectionSwitch(UnifiedVectorFormat &vdata, T predicate, Selec
 		break;
 	}
 	case ExpressionType::COMPARE_LESSTHANOREQUALTO: {
-		if (mask.AllValid()) {
+		if (mask.CannotHaveNull()) {
 			approved_tuple_count = TemplatedFilterSelection<T, LessThanEquals, false>(vdata, predicate, sel,
 			                                                                          approved_tuple_count, new_sel);
 		} else {
@@ -363,7 +370,7 @@ static void FilterSelectionSwitch(UnifiedVectorFormat &vdata, T predicate, Selec
 		break;
 	}
 	case ExpressionType::COMPARE_GREATERTHANOREQUALTO: {
-		if (mask.AllValid()) {
+		if (mask.CannotHaveNull()) {
 			approved_tuple_count = TemplatedFilterSelection<T, GreaterThanEquals, false>(vdata, predicate, sel,
 			                                                                             approved_tuple_count, new_sel);
 		} else {
@@ -381,7 +388,7 @@ static void FilterSelectionSwitch(UnifiedVectorFormat &vdata, T predicate, Selec
 template <bool IS_NULL>
 static idx_t TemplatedNullSelection(UnifiedVectorFormat &vdata, SelectionVector &sel, idx_t &approved_tuple_count) {
 	auto &mask = vdata.validity;
-	if (mask.AllValid()) {
+	if (mask.CannotHaveNull()) {
 		// no NULL values
 		if (IS_NULL) {
 			approved_tuple_count = 0;
@@ -455,113 +462,20 @@ idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, Unifi
 		}
 		return approved_tuple_count;
 	}
-	case TableFilterType::CONSTANT_COMPARISON: {
-		auto &constant_filter = filter.Cast<ConstantFilter>();
-		switch (vector.GetType().InternalType()) {
-		case PhysicalType::UINT8: {
-			auto predicate = UTinyIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<uint8_t>(vdata, predicate, sel, approved_tuple_count,
-			                               constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::UINT16: {
-			auto predicate = USmallIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<uint16_t>(vdata, predicate, sel, approved_tuple_count,
-			                                constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::UINT32: {
-			auto predicate = UIntegerValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<uint32_t>(vdata, predicate, sel, approved_tuple_count,
-			                                constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::UINT64: {
-			auto predicate = UBigIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<uint64_t>(vdata, predicate, sel, approved_tuple_count,
-			                                constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::INT8: {
-			auto predicate = TinyIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<int8_t>(vdata, predicate, sel, approved_tuple_count, constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::INT16: {
-			auto predicate = SmallIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<int16_t>(vdata, predicate, sel, approved_tuple_count,
-			                               constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::INT32: {
-			auto predicate = IntegerValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<int32_t>(vdata, predicate, sel, approved_tuple_count,
-			                               constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::INT64: {
-			auto predicate = BigIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<int64_t>(vdata, predicate, sel, approved_tuple_count,
-			                               constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::INT128: {
-			auto predicate = HugeIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<hugeint_t>(vdata, predicate, sel, approved_tuple_count,
-			                                 constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::UINT128: {
-			auto predicate = UhugeIntValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<uhugeint_t>(vdata, predicate, sel, approved_tuple_count,
-			                                  constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::FLOAT: {
-			auto predicate = FloatValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<float>(vdata, predicate, sel, approved_tuple_count, constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::DOUBLE: {
-			auto predicate = DoubleValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<double>(vdata, predicate, sel, approved_tuple_count, constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::VARCHAR: {
-			auto predicate = string_t(StringValue::Get(constant_filter.constant));
-			FilterSelectionSwitch<string_t>(vdata, predicate, sel, approved_tuple_count,
-			                                constant_filter.comparison_type);
-			break;
-		}
-		case PhysicalType::BOOL: {
-			auto predicate = BooleanValue::Get(constant_filter.constant);
-			FilterSelectionSwitch<bool>(vdata, predicate, sel, approved_tuple_count, constant_filter.comparison_type);
-			break;
-		}
-		default:
-			throw InvalidTypeException(vector.GetType(), "Invalid type for filter pushed down to table comparison");
-		}
-		return approved_tuple_count;
-	}
-	case TableFilterType::IS_NULL: {
-		return TemplatedNullSelection<true>(vdata, sel, approved_tuple_count);
-	}
-	case TableFilterType::IS_NOT_NULL: {
-		return TemplatedNullSelection<false>(vdata, sel, approved_tuple_count);
-	}
-	case TableFilterType::STRUCT_EXTRACT: {
-		auto &struct_filter = filter.Cast<StructFilter>();
-		// Apply the filter on the child vector
-		auto &child_vec = StructVector::GetEntries(vector)[struct_filter.child_idx];
-		UnifiedVectorFormat child_data;
-		child_vec->ToUnifiedFormat(scan_count, child_data);
-		return FilterSelection(sel, *child_vec, child_data, *struct_filter.child_filter, filter_state, scan_count,
-		                       approved_tuple_count);
-	}
 	case TableFilterType::BLOOM_FILTER: {
 		auto &bloom_filter = filter.Cast<BFTableFilter>();
-		auto &state = filter_state.Cast<BFTableFilterState>();
+		auto &state = filter_state.Cast<JoinFilterTableFilterState>();
 		return bloom_filter.Filter(vector, sel, approved_tuple_count, state);
+	}
+	case TableFilterType::PERFECT_HASH_JOIN_FILTER: {
+		auto &perfect_hash_join_filter = filter.Cast<PerfectHashJoinFilter>();
+		auto &state = filter_state.Cast<JoinFilterTableFilterState>();
+		return perfect_hash_join_filter.Filter(vector, sel, approved_tuple_count, state);
+	}
+	case TableFilterType::PREFIX_RANGE_FILTER: {
+		auto &prefix_range_filter = filter.Cast<PrefixRangeTableFilter>();
+		auto &state = filter_state.Cast<JoinFilterTableFilterState>();
+		return prefix_range_filter.Filter(vector, sel, approved_tuple_count, state);
 	}
 	case TableFilterType::EXPRESSION_FILTER: {
 		auto &state = filter_state.Cast<ExpressionFilterState>();
@@ -598,9 +512,9 @@ idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, Unifi
 					continue;
 				}
 				auto current_result_data = result_sel.data() + result_offset;
-				SelectionVector current_result_sel(current_result_data);
+				SelectionVector current_result_sel(current_result_data, result_sel.Capacity() - result_offset);
 				idx_t new_matches =
-				    state.executor.SelectExpression(chunk, current_result_sel, current_sel, current_count);
+				    state.executor->SelectExpression(chunk, current_result_sel, current_sel, current_count);
 				// increment all matches by the offset
 				for (idx_t i = 0; i < new_matches; i++) {
 					current_result_data[i] += offset;
@@ -612,9 +526,9 @@ idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, Unifi
 		} else {
 			// standard case: we can handle everything at once - run the expression once
 			DataChunk chunk;
-			chunk.data.emplace_back(vector);
+			chunk.data.emplace_back(Vector::Ref(vector));
 			chunk.SetCardinality(scan_count);
-			approved_tuple_count = state.executor.SelectExpression(chunk, result_sel, sel, approved_tuple_count);
+			approved_tuple_count = state.executor->SelectExpression(chunk, result_sel, sel, approved_tuple_count);
 		}
 		sel.Initialize(result_sel);
 		return approved_tuple_count;

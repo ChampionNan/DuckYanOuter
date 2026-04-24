@@ -15,13 +15,15 @@
 #include "duckdb/common/set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/complex_json.hpp"
+#include "duckdb/common/exception/parser_exception.hpp"
+
 #include <cstring>
 
 namespace duckdb {
 
 #ifndef DUCKDB_QUOTE_DEFINE
 // Preprocessor trick to allow text to be converted to C-string / string
-// Expecte use is:
+// Expected use is:
 //	#ifdef SOME_DEFINE
 //	string str = DUCKDB_QUOTE_DEFINE(SOME_DEFINE)
 //	...do something with str
@@ -40,18 +42,9 @@ class StringUtil {
 public:
 	static string GenerateRandomName(idx_t length = 16);
 
-	static uint8_t GetHexValue(char c) {
-		if (c >= '0' && c <= '9') {
-			return UnsafeNumericCast<uint8_t>(c - '0');
-		}
-		if (c >= 'a' && c <= 'f') {
-			return UnsafeNumericCast<uint8_t>(c - 'a' + 10);
-		}
-		if (c >= 'A' && c <= 'F') {
-			return UnsafeNumericCast<uint8_t>(c - 'A' + 10);
-		}
-		throw InvalidInputException("Invalid input for hex digit: %s", string(1, c));
-	}
+	static uint8_t GetHexValue(char c);
+	static bool CharacterIsHex(char c);
+
 	static uint8_t GetBinaryValue(char c) {
 		if (c >= '0' && c <= '1') {
 			return UnsafeNumericCast<uint8_t>(c - '0');
@@ -67,9 +60,6 @@ public:
 	}
 	static bool CharacterIsDigit(char c) {
 		return c >= '0' && c <= '9';
-	}
-	static bool CharacterIsHex(char c) {
-		return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 	}
 	static char CharacterToUpper(char c) {
 		if (c >= 'a' && c <= 'z') {
@@ -133,9 +123,9 @@ public:
 	DUCKDB_API static optional_idx Find(const string &haystack, const string &needle);
 
 	//! Returns true if the target string starts with the given prefix
-	DUCKDB_API static bool StartsWith(string str, string prefix);
+	DUCKDB_API static bool StartsWith(const string &str, const string &prefix);
 
-	//! Returns true if the target string <b>ends</b> with the given suffix.
+	//! Returns true if the target string ends with the given suffix
 	DUCKDB_API static bool EndsWith(const string &str, const string &suffix);
 
 	//! Repeat a string multiple times
@@ -148,7 +138,7 @@ public:
 	DUCKDB_API static vector<string> SplitWithParentheses(const string &str, char delimiter = ',', char par_open = '(',
 	                                                      char par_close = ')');
 
-	//! Split the input string allong a quote. Note that any escaping is NOT supported.
+	//! Split the input string along a quote. Note that any escaping is NOT supported.
 	DUCKDB_API static vector<string> SplitWithQuote(const string &str, char delimiter = ',', char quote = '"');
 
 	//! Join multiple strings into one string. Components are concatenated by the given separator
@@ -169,6 +159,8 @@ public:
 	DUCKDB_API static void SkipBOM(const char *buffer_ptr, const idx_t &buffer_size, idx_t &buffer_pos);
 
 	DUCKDB_API static idx_t ToUnsigned(const string &str);
+	DUCKDB_API static int64_t ToSigned(const string &str);
+	DUCKDB_API static double ToDouble(const string &str);
 
 	template <class T>
 	static string ToString(const vector<T> &input, const string &separator) {
@@ -203,6 +195,10 @@ public:
 	//! Return a string that formats the give number of bytes
 	DUCKDB_API static string BytesToHumanReadableString(idx_t bytes, idx_t multiplier = 1024);
 
+	DUCKDB_API static string TryParseFormattedBytes(const string &arg, idx_t &result);
+
+	DUCKDB_API static idx_t ParseFormattedBytes(const string &arg);
+
 	//! Convert a string to UPPERCASE
 	DUCKDB_API static string Upper(const string &str);
 
@@ -224,6 +220,9 @@ public:
 
 	//! Case insensitive equals (null-terminated strings)
 	DUCKDB_API static bool CIEquals(const char *l1, idx_t l1_size, const char *l2, idx_t l2_size);
+
+	//! Case insensitive starts-with
+	DUCKDB_API static bool CIStartsWith(const string &str, const string &prefix);
 
 	//! Case insensitive compare
 	DUCKDB_API static bool CILessThan(const string &l1, const string &l2);
@@ -349,5 +348,4 @@ public:
 	DUCKDB_API static const uint8_t ASCII_TO_LOWER_MAP[];
 	DUCKDB_API static const uint8_t ASCII_TO_UPPER_MAP[];
 };
-
 } // namespace duckdb

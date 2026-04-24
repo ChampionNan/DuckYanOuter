@@ -1,4 +1,5 @@
 #include "ast/generic_copy_option.hpp"
+#include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/statement/attach_statement.hpp"
@@ -7,11 +8,11 @@
 namespace duckdb {
 
 unique_ptr<SQLStatement> PEGTransformerFactory::TransformAttachStatement(PEGTransformer &transformer,
-                                                                         optional_ptr<ParseResult> parse_result) {
+                                                                         ParseResult &parse_result) {
 	auto result = make_uniq<AttachStatement>();
 	auto info = make_uniq<AttachInfo>();
 
-	auto &list_pr = parse_result->Cast<ListParseResult>();
+	auto &list_pr = parse_result.Cast<ListParseResult>();
 	auto or_replace = list_pr.Child<OptionalParseResult>(1).HasResult();
 	auto if_not_exists = list_pr.Child<OptionalParseResult>(2).HasResult();
 
@@ -27,7 +28,7 @@ unique_ptr<SQLStatement> PEGTransformerFactory::TransformAttachStatement(PEGTran
 		info->on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
 	}
 
-	info->path = list_pr.Child<ListParseResult>(4).Child<StringLiteralParseResult>(0).result;
+	info->parsed_path = transformer.Transform<unique_ptr<ParsedExpression>>(list_pr.Child<ListParseResult>(4));
 	transformer.TransformOptional<string>(list_pr, 5, info->name);
 	vector<GenericCopyOption> copy_options;
 	transformer.TransformOptional<vector<GenericCopyOption>>(list_pr, 6, copy_options);
@@ -53,77 +54,90 @@ unique_ptr<SQLStatement> PEGTransformerFactory::TransformAttachStatement(PEGTran
 	return std::move(result);
 }
 
-string PEGTransformerFactory::TransformAttachAlias(PEGTransformer &transformer,
-                                                   optional_ptr<ParseResult> parse_result) {
-	auto &list_pr = parse_result->Cast<ListParseResult>();
+string PEGTransformerFactory::TransformAttachAlias(PEGTransformer &transformer, ParseResult &parse_result) {
+	auto &list_pr = parse_result.Cast<ListParseResult>();
 	auto &col_id = list_pr.Child<ListParseResult>(1).Child<ChoiceParseResult>(0);
-	if (col_id.result->type == ParseResultType::IDENTIFIER) {
-		return col_id.result->Cast<IdentifierParseResult>().identifier;
+	if (col_id.GetResult().type == ParseResultType::IDENTIFIER) {
+		return col_id.GetResult().Cast<IdentifierParseResult>().identifier;
 	}
-	return transformer.Transform<string>(col_id.result);
+	return transformer.Transform<string>(col_id.GetResult());
 }
 
 vector<GenericCopyOption> PEGTransformerFactory::TransformAttachOptions(PEGTransformer &transformer,
-                                                                        optional_ptr<ParseResult> parse_result) {
-	auto &list_pr = parse_result->Cast<ListParseResult>();
-	auto &parens = list_pr.Child<ListParseResult>(0);
-	auto &generic_copy_option_list = parens.Child<ListParseResult>(1);
-
-	return transformer.Transform<vector<GenericCopyOption>>(generic_copy_option_list);
+                                                                        ParseResult &parse_result) {
+	auto &list_pr = parse_result.Cast<ListParseResult>();
+	return transformer.Transform<vector<GenericCopyOption>>(list_pr.Child<ListParseResult>(0));
 }
 
-vector<GenericCopyOption>
-PEGTransformerFactory::TransformGenericCopyOptionList(PEGTransformer &transformer,
-                                                      optional_ptr<ParseResult> parse_result) {
+vector<GenericCopyOption> PEGTransformerFactory::TransformGenericCopyOptionList(PEGTransformer &transformer,
+                                                                                ParseResult &parse_result) {
 	vector<GenericCopyOption> result;
-	auto &list_pr = parse_result->Cast<ListParseResult>();
-	auto &list = list_pr.Child<ListParseResult>(0);
-	auto &first_element = list.Child<ListParseResult>(0);
-	result.push_back(transformer.Transform<GenericCopyOption>(first_element));
-	auto &extra_elements = list.Child<OptionalParseResult>(1);
-	if (extra_elements.HasResult()) {
-		auto &repeat_pr = extra_elements.optional_result->Cast<RepeatParseResult>();
-		for (auto &element : repeat_pr.children) {
-			auto &child = element->Cast<ListParseResult>();
-			result.push_back(transformer.Transform<GenericCopyOption>(child.Child<ListParseResult>(1)));
-		}
+	auto &list_pr = parse_result.Cast<ListParseResult>();
+	auto &extract_parens = ExtractResultFromParens(list_pr.Child<ListParseResult>(0));
+	auto option_list = ExtractParseResultsFromList(extract_parens);
+	for (auto &option : option_list) {
+		result.push_back(transformer.Transform<GenericCopyOption>(option));
 	}
 	return result;
 }
 
 GenericCopyOption PEGTransformerFactory::TransformGenericCopyOption(PEGTransformer &transformer,
-                                                                    optional_ptr<ParseResult> parse_result) {
+                                                                    ParseResult &parse_result) {
 	GenericCopyOption copy_option;
 
-	auto &list_pr = parse_result->Cast<ListParseResult>();
+	auto &list_pr = parse_result.Cast<ListParseResult>();
 	copy_option.name = StringUtil::Lower(list_pr.Child<IdentifierParseResult>(0).identifier);
 	auto &optional_expression = list_pr.Child<OptionalParseResult>(1);
-	if (optional_expression.HasResult()) {
-		auto expression = transformer.Transform<unique_ptr<ParsedExpression>>(optional_expression.optional_result);
-		if (expression->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
-			copy_option.children.push_back(Value(expression->Cast<ConstantExpression>().value));
-		} else if (expression->GetExpressionType() == ExpressionType::COLUMN_REF) {
-			copy_option.children.push_back(Value(expression->Cast<ColumnRefExpression>().GetColumnName()));
-		} else if (expression->GetExpressionType() == ExpressionType::PLACEHOLDER) {
-			auto &op_expr = expression->Cast<OperatorExpression>();
-			for (auto &child : op_expr.children) {
-				if (child->GetExpressionClass() == ExpressionClass::CONSTANT) {
-					copy_option.children.push_back(Value(child->Cast<ConstantExpression>().value));
-				} else if (child->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
-					copy_option.children.push_back(Value(child->Cast<ColumnRefExpression>().GetColumnName()));
-				} else {
-					throw InternalException("Unexpected expression type %s encountered for GenericCopyOption",
-					                        ExpressionClassToString(child->GetExpressionClass()));
-				}
+	if (!optional_expression.HasResult()) {
+		return copy_option;
+	}
+	// TODO(Dtenwolde) Rework to switch statement
+	auto expression = transformer.Transform<unique_ptr<ParsedExpression>>(optional_expression.GetResult());
+	if (expression->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+		copy_option.children.push_back(Value(expression->Cast<ConstantExpression>().value));
+	} else if (expression->GetExpressionType() == ExpressionType::COLUMN_REF) {
+		copy_option.children.push_back(Value(expression->Cast<ColumnRefExpression>().GetColumnName()));
+	} else if (expression->GetExpressionType() == ExpressionType::PLACEHOLDER) {
+		auto &op_expr = expression->Cast<OperatorExpression>();
+		for (auto &child : op_expr.children) {
+			if (child->GetExpressionClass() == ExpressionClass::CONSTANT) {
+				copy_option.children.push_back(Value(child->Cast<ConstantExpression>().value));
+			} else if (child->GetExpressionClass() == ExpressionClass::COLUMN_REF) {
+				copy_option.children.push_back(Value(child->Cast<ColumnRefExpression>().GetColumnName()));
+			} else {
+				throw InternalException("Unexpected expression type %s encountered for GenericCopyOption",
+				                        ExpressionClassToString(child->GetExpressionClass()));
 			}
-		} else if (expression->GetExpressionType() == ExpressionType::FUNCTION) {
-			copy_option.expression = std::move(expression);
-		} else {
-			throw NotImplementedException("Unrecognized expression type %s",
-			                              ExpressionTypeToString(expression->GetExpressionType()));
 		}
+	} else if (expression->GetExpressionType() == ExpressionType::FUNCTION) {
+		copy_option.expression = std::move(expression);
+	} else if (expression->GetExpressionType() == ExpressionType::STAR) {
+		copy_option.children.push_back(Value("*"));
+	} else if (expression->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		auto &cast_expr = expression->Cast<CastExpression>();
+		if (cast_expr.child->GetExpressionClass() == ExpressionClass::CONSTANT) {
+			auto &const_expr = cast_expr.child->Cast<ConstantExpression>();
+			if (const_expr.value.GetValue<string>() == "t") {
+				copy_option.children.push_back(Value(true));
+			} else if (const_expr.value.GetValue<string>() == "f") {
+				copy_option.children.push_back(Value(false));
+			} else {
+				copy_option.expression = std::move(expression);
+			}
+		} else {
+			copy_option.expression = std::move(expression);
+		}
+	} else {
+		throw NotImplementedException("Unrecognized expression type %s",
+		                              ExpressionTypeToString(expression->GetExpressionType()));
 	}
 	return copy_option;
+}
+
+unique_ptr<ParsedExpression> PEGTransformerFactory::TransformDatabasePath(PEGTransformer &transformer,
+                                                                          ParseResult &parse_result) {
+	auto &list_pr = parse_result.Cast<ListParseResult>();
+	return transformer.Transform<unique_ptr<ParsedExpression>>(list_pr.GetChild(0));
 }
 
 } // namespace duckdb

@@ -22,10 +22,12 @@ public:
 
 protected:
 	BindResult BindLambdaReference(LambdaRefExpression &expr, idx_t depth);
-	BindResult BindWindow(WindowExpression &expr, idx_t depth) override;
+	BindResult BindWindowExpression(WindowExpression &expr, idx_t depth) override;
 	BindResult BindColumnRef(unique_ptr<ParsedExpression> &expr_ptr, idx_t depth, bool root_expression) override;
 
 	unique_ptr<ParsedExpression> QualifyColumnName(ColumnRefExpression &col_ref, ErrorData &error) override;
+
+	bool DoesColumnAliasExist(const ColumnRefExpression &colref) override;
 
 private:
 	ColumnAliasBinder column_alias_binder;

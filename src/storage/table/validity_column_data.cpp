@@ -1,8 +1,6 @@
 #include "duckdb/storage/table/validity_column_data.hpp"
 #include "duckdb/storage/table/column_checkpoint_state.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
-#include "duckdb/storage/table/update_segment.hpp"
-#include "duckdb/storage/table/standard_column_data.hpp"
 
 namespace duckdb {
 
@@ -20,7 +18,7 @@ FilterPropagateResult ValidityColumnData::CheckZonemap(ColumnScanState &state, T
 	return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 }
 
-void ValidityColumnData::UpdateWithBase(TransactionData transaction, DataTable &data_table, idx_t column_index,
+void ValidityColumnData::UpdateWithBase(TransactionData transaction, DuckTableEntry &table_entry, idx_t column_index,
                                         Vector &update_vector, row_t *row_ids, idx_t update_count, ColumnData &base,
                                         idx_t row_group_start) {
 	Vector base_vector(base.type);
@@ -30,11 +28,12 @@ void ValidityColumnData::UpdateWithBase(TransactionData transaction, DataTable &
 	    CompressionType::COMPRESSION_EMPTY) {
 		// The validity is actually covered by the data, so we read it to get the validity for UpdateInternal.
 		ColumnScanState data_scan_state(nullptr);
-		auto fetch_count = base.Fetch(data_scan_state, row_ids[0], base_vector);
+		auto fetch_count =
+		    base.Fetch(data_scan_state, row_ids[0] - UnsafeNumericCast<row_t>(row_group_start), base_vector);
 		base_vector.Flatten(fetch_count);
 	}
 
-	UpdateInternal(transaction, data_table, column_index, update_vector, row_ids, update_count, base_vector,
+	UpdateInternal(transaction, table_entry, column_index, update_vector, row_ids, update_count, base_vector,
 	               row_group_start);
 }
 

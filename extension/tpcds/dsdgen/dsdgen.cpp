@@ -13,7 +13,6 @@
 #include <cassert>
 
 using namespace duckdb;
-using namespace std;
 
 namespace tpcds {
 
@@ -74,6 +73,15 @@ void DSDGenWrapper::DSDGen(double scale, ClientContext &context, string catalog_
 		return;
 	}
 
+#ifdef DEBUG
+	// With a scale of 778+ the following multiplication (signed int target value) during generation is:
+	// r->cc_sq_ft *= r->cc_employees overflows;
+	// 3,464,105 * 649 = 2,248,204,145 (max. signed int value: 2,147,483,647)
+	if (scale > 777) {
+		throw InvalidInputException("DSDGen results in a signed integer overflow with a scale exceeding 777.");
+	}
+#endif
+
 	InitializeDSDgen(scale);
 
 	// populate append info
@@ -119,7 +127,7 @@ void DSDGenWrapper::DSDGen(double scale, ClientContext &context, string catalog_
 		assert(builder_func);
 
 		for (ds_key_t i = k_first_row; k_row_count; i++, k_row_count--) {
-			if (k_row_count % 1000 == 0 && context.interrupted) {
+			if (k_row_count % 1000 == 0 && context.IsInterrupted()) {
 				throw InterruptException();
 			}
 			// append happens directly in builders since they dump child tables

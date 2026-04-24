@@ -9,7 +9,6 @@
 duckdb::unique_ptr<duckdb::ArrowArrayStreamWrapper>
 ArrowStreamTestFactory::CreateStream(uintptr_t this_ptr, duckdb::ArrowStreamParameters &parameters) {
 	auto stream_wrapper = duckdb::make_uniq<duckdb::ArrowArrayStreamWrapper>();
-	stream_wrapper->number_of_rows = -1;
 	stream_wrapper->arrow_array_stream = *(ArrowArrayStream *)this_ptr;
 
 	return stream_wrapper;
@@ -113,7 +112,6 @@ duckdb::unique_ptr<duckdb::ArrowArrayStreamWrapper> ArrowTestFactory::CreateStre
 	}
 
 	auto stream_wrapper = make_uniq<ArrowArrayStreamWrapper>();
-	stream_wrapper->number_of_rows = -1;
 	auto private_data = make_uniq<ArrowArrayStreamData>(factory, factory.options);
 	stream_wrapper->arrow_array_stream.get_schema = ArrowArrayStreamGetSchema;
 	stream_wrapper->arrow_array_stream.get_next = ArrowArrayStreamGetNext;
@@ -154,6 +152,11 @@ bool ArrowTestHelper::CompareResults(Connection &con, unique_ptr<QueryResult> ar
                                      unique_ptr<MaterializedQueryResult> duck, const string &query) {
 	auto &materialized_arrow = (MaterializedQueryResult &)*arrow;
 	// compare the results
+	if (materialized_arrow.statement_type == StatementType::INVALID_STATEMENT ||
+	    duck->statement_type == StatementType::INVALID_STATEMENT) {
+		return materialized_arrow.type == duck->type;
+	}
+
 	string error;
 
 	auto arrow_collection = materialized_arrow.TakeCollection();
@@ -234,8 +237,8 @@ bool ArrowTestHelper::RunArrowComparison(Connection &con, const string &query, b
 		ScopedConfigSetting setting(
 		    config,
 		    [&batch_size](ClientConfig &config) {
-			    config.get_result_collector = [&batch_size](ClientContext &context,
-			                                                PreparedStatementData &data) -> PhysicalOperator & {
+			    config.get_result_collector =
+			        [&batch_size](ClientContext &context, PreparedStatementData &data) -> unique_ptr<PhysicalOperator> {
 				    return PhysicalArrowCollector::Create(context, data, batch_size);
 			    };
 		    },
@@ -274,12 +277,22 @@ bool ArrowTestHelper::RunArrowComparison(Connection &con, const string &query, b
 }
 
 bool ArrowTestHelper::RunArrowComparison(Connection &con, const string &query, ArrowArrayStream &arrow_stream) {
-	// construct the arrow scan
-	auto params = ConstructArrowScan(arrow_stream);
+	unique_ptr<QueryResult> arrow_result;
+	if (!arrow_stream.private_data) {
+		// no data, treat as empty result
+		StatementProperties properties;
+		vector<string> names;
+		auto collection = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator());
+		arrow_result = make_uniq<MaterializedQueryResult>(StatementType::INVALID_STATEMENT, properties,
+		                                                  std::move(names), std::move(collection), ClientProperties());
+	} else {
+		// construct the arrow scan
+		auto params = ConstructArrowScan(arrow_stream);
 
-	// run the arrow scan over the result
-	auto arrow_result = ScanArrowObject(con, params);
-	arrow_stream.release = nullptr;
+		// run the arrow scan over the result
+		arrow_result = ScanArrowObject(con, params);
+		arrow_stream.release = nullptr;
+	}
 
 	if (!arrow_result) {
 		printf("Query: %s\n", query.c_str());

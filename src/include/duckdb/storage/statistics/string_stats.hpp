@@ -8,18 +8,17 @@
 
 #pragma once
 
-#include "duckdb/common/common.hpp"
+#include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/enums/filter_propagate_result.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/operator/comparison_operators.hpp"
-#include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/array_ptr.hpp"
 
 namespace duckdb {
 class BaseStatistics;
 struct SelectionVector;
 class Vector;
+class Value;
 
 struct StringStatsData {
 	constexpr static uint32_t MAX_STRING_MINMAX_SIZE = 8;
@@ -41,6 +40,8 @@ struct StringStats {
 	DUCKDB_API static BaseStatistics CreateUnknown(LogicalType type);
 	//! Empty statistics - i.e. "has_unicode" is false, "max_string_length" is 0, "min" is \xFF, max is \x00
 	DUCKDB_API static BaseStatistics CreateEmpty(LogicalType type);
+	//! Returns true if the stats has both a min and max value defined
+	DUCKDB_API static bool HasMinMax(const BaseStatistics &stats);
 	//! Whether or not the statistics have a maximum string length defined
 	DUCKDB_API static bool HasMaxStringLength(const BaseStatistics &stats);
 	//! Returns the maximum string length, or throws an exception if !HasMaxStringLength()
@@ -62,7 +63,7 @@ struct StringStats {
 	DUCKDB_API static void Serialize(const BaseStatistics &stats, Serializer &serializer);
 	DUCKDB_API static void Deserialize(Deserializer &deserializer, BaseStatistics &base);
 
-	DUCKDB_API static string ToString(const BaseStatistics &stats);
+	DUCKDB_API static child_list_t<Value> ToStruct(const BaseStatistics &stats);
 
 	DUCKDB_API static FilterPropagateResult CheckZonemap(const BaseStatistics &stats, ExpressionType comparison_type,
 	                                                     array_ptr<const Value> constants);

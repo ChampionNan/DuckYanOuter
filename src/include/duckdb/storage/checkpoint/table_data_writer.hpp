@@ -14,6 +14,7 @@
 namespace duckdb {
 class DuckTableEntry;
 class TableStatistics;
+class SingleFileCheckpointWriter;
 
 //! The table data writer is responsible for writing the data of a table to storage.
 //
@@ -29,7 +30,8 @@ public:
 public:
 	void WriteTableData(Serializer &metadata_serializer);
 
-	virtual void WriteUnchangedTable(MetaBlockPointer pointer, idx_t total_rows) = 0;
+	virtual void WriteUnchangedTable(MetaBlockPointer pointer, const vector<MetaBlockPointer> &metadata_pointers,
+	                                 idx_t total_rows) = 0;
 	virtual void FinalizeTable(const TableStatistics &global_stats, DataTableInfo &info, RowGroupCollection &collection,
 	                           Serializer &serializer) = 0;
 	virtual unique_ptr<RowGroupWriter> GetRowGroupWriter(RowGroup &row_group) = 0;
@@ -38,13 +40,29 @@ public:
 	virtual CheckpointOptions GetCheckpointOptions() const = 0;
 	virtual void FlushPartialBlocks() = 0;
 	virtual MetadataManager &GetMetadataManager() = 0;
-	bool CanOverrideBaseStats() const {
-		return override_base_stats;
+	optional_idx GetRowGroupCount() {
+		return row_group_count;
 	}
-	void SetCannotOverrideStats() {
-		override_base_stats = false;
+	void SetRowGroupCount(optional_idx row_group_count_p) {
+		row_group_count = row_group_count_p;
+	}
+	bool GetRebuildIndexes() const {
+		return rebuild_indexes;
+	}
+	void SetRebuildIndexes() {
+		rebuild_indexes = true;
+	}
+	bool RequireLegacyStartRow() const {
+		return require_legacy_start_row;
+	}
+	void SetRowIdsChanged() {
+		row_ids_changed = true;
+	}
+	bool RowIdsChanged() const {
+		return row_ids_changed;
 	}
 
+	AttachedDatabase &GetAttached();
 	DatabaseInstance &GetDatabase();
 	unique_ptr<TaskExecutor> CreateTaskExecutor();
 
@@ -53,7 +71,11 @@ protected:
 	optional_ptr<ClientContext> context;
 	//! Pointers to the start of each row group.
 	vector<RowGroupPointer> row_group_pointers;
-	bool override_base_stats = true;
+
+	optional_idx row_group_count;
+	bool rebuild_indexes = false;
+	bool require_legacy_start_row = false;
+	atomic<bool> row_ids_changed {false};
 };
 
 class SingleFileTableDataWriter : public TableDataWriter {
@@ -62,7 +84,8 @@ public:
 	                          MetadataWriter &table_data_writer);
 
 public:
-	void WriteUnchangedTable(MetaBlockPointer pointer, idx_t total_rows) override;
+	void WriteUnchangedTable(MetaBlockPointer pointer, const vector<MetaBlockPointer> &metadata_pointers,
+	                         idx_t total_rows) override;
 	void FinalizeTable(const TableStatistics &global_stats, DataTableInfo &info, RowGroupCollection &collection,
 	                   Serializer &serializer) override;
 	unique_ptr<RowGroupWriter> GetRowGroupWriter(RowGroup &row_group) override;

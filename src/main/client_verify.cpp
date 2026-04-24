@@ -4,6 +4,7 @@
 #include "duckdb/verification/statement_verifier.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/box_renderer.hpp"
+#include "duckdb/common/box_renderer_context.hpp"
 
 namespace duckdb {
 
@@ -53,6 +54,8 @@ ErrorData ClientContext::VerifyQuery(ClientContextLock &lock, const string &quer
 		statement_verifiers.emplace_back(StatementVerifier::Create(VerificationType::COPIED, stmt, parameters));
 		statement_verifiers.emplace_back(StatementVerifier::Create(VerificationType::DESERIALIZED, stmt, parameters));
 		statement_verifiers.emplace_back(StatementVerifier::Create(VerificationType::UNOPTIMIZED, stmt, parameters));
+		statement_verifiers.emplace_back(
+		    StatementVerifier::Create(VerificationType::NO_OPERATOR_CACHING, stmt, parameters));
 
 		// FIXME: Prepared parameter verifier is broken for queries with parameters
 		if (!parameters || parameters->empty()) {
@@ -65,14 +68,6 @@ ErrorData ClientContext::VerifyQuery(ClientContextLock &lock, const string &quer
 		statement_verifiers.emplace_back(
 		    StatementVerifier::Create(VerificationType::FETCH_ROW_AS_SCAN, stmt, parameters));
 	}
-
-	// For the DEBUG_ASYNC build we enable this extra verifier
-#ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
-	if (config.query_verification_enabled) {
-		statement_verifiers.emplace_back(
-		    StatementVerifier::Create(VerificationType::NO_OPERATOR_CACHING, stmt, parameters));
-	}
-#endif
 
 	// Verify external always needs to be explicitly enabled and is never part of default verifier set
 	if (config.verify_external) {
@@ -178,7 +173,8 @@ ErrorData ClientContext::VerifyQuery(ClientContextLock &lock, const string &quer
 		config.max_width = random.NextRandomInteger() % 500;
 		BoxRenderer renderer(config);
 		auto pinned_result_set = original->materialized_result->Pin();
-		renderer.ToString(*this, original->materialized_result->names, pinned_result_set->collection);
+		ClientBoxRendererContext render_context(*this);
+		renderer.ToString(render_context, original->materialized_result->names, pinned_result_set->collection);
 #endif
 	}
 

@@ -1,6 +1,5 @@
 #include "duckdb/function/scalar_macro_function.hpp"
 #include "duckdb/function/table_macro_function.hpp"
-#include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/transformer.hpp"
@@ -39,12 +38,6 @@ unique_ptr<MacroFunction> Transformer::TransformMacroFunction(duckdb_libpgquery:
 		// Transform parameter default value
 		if (param.defaultValue) {
 			auto default_expr = TransformExpression(PGPointerCast<duckdb_libpgquery::PGNode>(param.defaultValue));
-			Value default_value;
-			if (!ConstructConstantFromExpression(*default_expr, default_value)) {
-				throw ParserException("Invalid default value for parameter '%s': %s", param.name,
-				                      default_expr->ToString());
-			}
-			default_expr = make_uniq<ConstantExpression>(std::move(default_value));
 			default_expr->SetAlias(param.name);
 			macro_func->default_parameters[param.name] = std::move(default_expr);
 		} else if (!macro_func->default_parameters.empty()) {

@@ -8,15 +8,16 @@
 
 #pragma once
 
-#include "duckdb/storage/table/row_group.hpp"
 #include "duckdb/storage/storage_lock.hpp"
 #include "duckdb/storage/statistics/segment_statistics.hpp"
 #include "duckdb/common/types/string_heap.hpp"
 #include "duckdb/transaction/undo_buffer_allocator.hpp"
+#include "duckdb/transaction/transaction_data.hpp"
 
 namespace duckdb {
 class ColumnData;
 class DataTable;
+class DuckTableEntry;
 class Vector;
 struct UpdateInfo;
 struct UpdateNode;
@@ -38,8 +39,8 @@ public:
 	void FetchUpdates(TransactionData transaction, idx_t vector_index, Vector &result);
 	void FetchCommitted(idx_t vector_index, Vector &result);
 	void FetchCommittedRange(idx_t start_row, idx_t count, Vector &result);
-	void Update(TransactionData transaction, DataTable &data_table, idx_t column_index, Vector &update, row_t *ids,
-	            idx_t count, Vector &base_data, idx_t row_group_start);
+	void Update(TransactionData transaction, DuckTableEntry &table_entry, idx_t column_index, Vector &update,
+	            row_t *ids, idx_t count, Vector &base_data, idx_t row_group_start);
 	void FetchRow(TransactionData transaction, idx_t row_id, Vector &result, idx_t result_idx);
 
 	void RollbackUpdate(UpdateInfo &info);

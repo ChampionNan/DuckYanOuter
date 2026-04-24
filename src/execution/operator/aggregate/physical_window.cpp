@@ -5,12 +5,8 @@
 #include "duckdb/common/types/row/tuple_data_iterator.hpp"
 #include "duckdb/function/window/window_aggregate_function.hpp"
 #include "duckdb/function/window/window_executor.hpp"
-#include "duckdb/function/window/window_rank_function.hpp"
-#include "duckdb/function/window/window_rownumber_function.hpp"
 #include "duckdb/function/window/window_shared_expressions.hpp"
-#include "duckdb/function/window/window_value_function.hpp"
 #include "duckdb/planner/expression/bound_window_expression.hpp"
-#include "duckdb/main/settings.hpp"
 
 namespace duckdb {
 
@@ -28,8 +24,6 @@ struct WindowSourceTask {
 	idx_t group_idx = 0;
 	//! The thread index (for local state)
 	idx_t thread_idx = 0;
-	//! The total block index count
-	idx_t max_idx = 0;
 	//! The first block index count
 	idx_t begin_idx = 0;
 	//! The end block index count
@@ -141,8 +135,7 @@ public:
 			task.thread_idx = next_task % group_threads;
 			task.group_idx = hash_bin;
 			task.begin_idx = task.thread_idx * per_thread;
-			task.max_idx = ChunkCount();
-			task.end_idx = MinValue<idx_t>(task.begin_idx + per_thread, task.max_idx);
+			task.end_idx = MinValue<idx_t>(task.begin_idx + per_thread, ChunkCount());
 			++next_task;
 			return true;
 		}
@@ -164,7 +157,7 @@ public:
 	OrderMasks order_masks;
 	//! The fully materialised data collection
 	unique_ptr<WindowCollection> collection;
-	// The processing stage for this group
+	//! The processing stage for this group
 	atomic<WindowGroupStage> stage;
 	//! The function global states for this hash group
 	ExecutorGlobalStates gestates;
@@ -182,17 +175,17 @@ public:
 	//! The next task to process
 	idx_t next_task = 0;
 	//! Count of sorted run blocks
-	std::atomic<idx_t> sorted;
+	atomic<idx_t> sorted;
 	//! Count of materialized run blocks
-	std::atomic<idx_t> materialized;
+	atomic<idx_t> materialized;
 	//! Count of masked blocks
-	std::atomic<idx_t> masked;
+	atomic<idx_t> masked;
 	//! Count of sunk rows
-	std::atomic<idx_t> sunk;
+	atomic<idx_t> sunk;
 	//! Count of finalized blocks
-	std::atomic<idx_t> finalized;
+	atomic<idx_t> finalized;
 	//! Count of completed tasks
-	std::atomic<idx_t> completed;
+	atomic<idx_t> completed;
 	//! The output ordering batch index this hash group starts at
 	idx_t batch_base;
 };
@@ -260,36 +253,14 @@ PhysicalWindow::PhysicalWindow(PhysicalPlan &physical_plan, vector<LogicalType> 
 }
 
 static unique_ptr<WindowExecutor> WindowExecutorFactory(BoundWindowExpression &wexpr, ClientContext &client,
-                                                        WindowSharedExpressions &shared, WindowAggregationMode mode) {
-	switch (wexpr.GetExpressionType()) {
-	case ExpressionType::WINDOW_AGGREGATE:
-		return make_uniq<WindowAggregateExecutor>(wexpr, client, shared, mode);
-	case ExpressionType::WINDOW_ROW_NUMBER:
-		return make_uniq<WindowRowNumberExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_RANK_DENSE:
-		return make_uniq<WindowDenseRankExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_RANK:
-		return make_uniq<WindowRankExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_PERCENT_RANK:
-		return make_uniq<WindowPercentRankExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_CUME_DIST:
-		return make_uniq<WindowCumeDistExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_NTILE:
-		return make_uniq<WindowNtileExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_LEAD:
-	case ExpressionType::WINDOW_LAG:
-		return make_uniq<WindowLeadLagExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_FILL:
-		return make_uniq<WindowFillExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_FIRST_VALUE:
-		return make_uniq<WindowFirstValueExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_LAST_VALUE:
-		return make_uniq<WindowLastValueExecutor>(wexpr, shared);
-	case ExpressionType::WINDOW_NTH_VALUE:
-		return make_uniq<WindowNthValueExecutor>(wexpr, shared);
-		break;
-	default:
-		throw InternalException("Window aggregate type %s", ExpressionTypeToString(wexpr.GetExpressionType()));
+                                                        WindowSharedExpressions &shared) {
+	if (wexpr.GetExpressionType() == ExpressionType::WINDOW_AGGREGATE) {
+		return make_uniq<WindowAggregateExecutor>(wexpr, client, shared);
+	} else {
+		if (!wexpr.window.get()) {
+			throw InternalException("Window expression type %s", ExpressionTypeToString(wexpr.GetExpressionType()));
+		}
+		return make_uniq<WindowExecutor>(wexpr, shared);
 	}
 }
 
@@ -298,11 +269,10 @@ WindowGlobalSinkState::WindowGlobalSinkState(const PhysicalWindow &op, ClientCon
 	D_ASSERT(op.select_list[op.order_idx]->GetExpressionClass() == ExpressionClass::BOUND_WINDOW);
 	auto &wexpr = op.select_list[op.order_idx]->Cast<BoundWindowExpression>();
 
-	const auto mode = DBConfig::GetSetting<DebugWindowModeSetting>(client);
 	for (idx_t expr_idx = 0; expr_idx < op.select_list.size(); ++expr_idx) {
 		D_ASSERT(op.select_list[expr_idx]->GetExpressionClass() == ExpressionClass::BOUND_WINDOW);
 		auto &wexpr = op.select_list[expr_idx]->Cast<BoundWindowExpression>();
-		auto wexec = WindowExecutorFactory(wexpr, client, shared, mode);
+		auto wexec = WindowExecutorFactory(wexpr, client, shared);
 		executors.emplace_back(std::move(wexec));
 	}
 
@@ -883,7 +853,7 @@ WindowLocalSourceState::WindowLocalSourceState(WindowGlobalSourceState &gsource)
 }
 
 bool WindowGlobalSourceState::TryNextTask(TaskPtr &task, Task &task_local) {
-	auto guard = Lock();
+	annotated_lock_guard<annotated_mutex> guard(lock);
 	FinishTask(task);
 
 	if (!HasMoreTasks()) {
@@ -895,7 +865,7 @@ bool WindowGlobalSourceState::TryNextTask(TaskPtr &task, Task &task_local) {
 	for (const auto &group_idx : active_groups) {
 		auto &window_hash_group = window_hash_groups[group_idx];
 		if (window_hash_group->TryPrepareNextStage()) {
-			UnblockTasks(guard);
+			UnblockTasks();
 		}
 		if (window_hash_group->TryNextTask(task_local)) {
 			task = task_local;
@@ -911,7 +881,7 @@ bool WindowGlobalSourceState::TryNextTask(TaskPtr &task, Task &task_local) {
 
 		auto &window_hash_group = window_hash_groups[group_idx];
 		if (window_hash_group->TryPrepareNextStage()) {
-			UnblockTasks(guard);
+			UnblockTasks();
 		}
 		if (!window_hash_group->TryNextTask(task_local)) {
 			//	Group has no tasks (empty?)
@@ -1026,7 +996,7 @@ void WindowLocalSourceState::GetData(ExecutionContext &context, DataChunk &resul
 		executor.Evaluate(context, position, eval_chunk, result, sink);
 	}
 	output_chunk.SetCardinality(input_chunk);
-	output_chunk.Verify();
+	output_chunk.Verify(context.client.db);
 
 	idx_t out_idx = 0;
 	result.SetCardinality(input_chunk);
@@ -1040,7 +1010,7 @@ void WindowLocalSourceState::GetData(ExecutionContext &context, DataChunk &resul
 	// Move to the next chunk
 	++task->begin_idx;
 
-	result.Verify();
+	result.Verify(context.client.db);
 }
 
 unique_ptr<LocalSourceState> PhysicalWindow::GetLocalSourceState(ExecutionContext &context,
@@ -1122,15 +1092,15 @@ SourceResultType PhysicalWindow::GetDataInternal(ExecutionContext &context, Data
 				throw;
 			}
 		} else {
-			auto guard = gsource.Lock();
+			annotated_lock_guard<annotated_mutex> guard(gsource.lock);
 			if (!gsource.HasMoreTasks()) {
 				// no more tasks - exit
-				gsource.UnblockTasks(guard);
+				gsource.UnblockTasks();
 				break;
 			} else {
 				// there are more tasks available, but we can't execute them yet
 				// block the source
-				return gsource.BlockSource(guard, source.interrupt_state);
+				return gsource.BlockSource(source.interrupt_state);
 			}
 		}
 	}
@@ -1151,6 +1121,7 @@ InsertionOrderPreservingMap<string> PhysicalWindow::ParamsToString() const {
 		projections += select_list[i]->GetName();
 	}
 	result["Projections"] = projections;
+	SetEstimatedCardinality(result, estimated_cardinality);
 	return result;
 }
 

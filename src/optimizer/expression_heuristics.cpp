@@ -1,8 +1,9 @@
 #include "duckdb/optimizer/expression_heuristics.hpp"
+#include "duckdb/planner/table_filter_set.hpp"
 
 #include "duckdb/planner/expression/list.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
-#include "duckdb/planner/filter/constant_filter.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/struct_filter.hpp"
 
 namespace duckdb {
@@ -155,7 +156,7 @@ idx_t ExpressionHeuristics::ExpressionCost(BoundOperatorExpression &expr, Expres
 }
 
 idx_t ExpressionHeuristics::ExpressionCost(PhysicalType return_type, idx_t multiplier) {
-	// TODO: ajust values according to benchmark results
+	// TODO: adjust values according to benchmark results
 	switch (return_type) {
 	case PhysicalType::VARCHAR:
 		return 5 * multiplier;
@@ -210,7 +211,7 @@ idx_t ExpressionHeuristics::Cost(Expression &expr) {
 		return ExpressionCost(const_expr.return_type.InternalType(), 1);
 	}
 	case ExpressionClass::BOUND_REF: {
-		auto &col_expr = expr.Cast<BoundColumnRefExpression>();
+		auto &col_expr = expr.Cast<BoundReferenceExpression>();
 		return ExpressionCost(col_expr.return_type.InternalType(), 8);
 	}
 	default: {
@@ -222,7 +223,11 @@ idx_t ExpressionHeuristics::Cost(Expression &expr) {
 	return 1000;
 }
 
-idx_t ExpressionHeuristics::Cost(TableFilter &filter) {
+idx_t ExpressionHeuristics::Cost(const TableFilter &filter) {
+	if (filter.filter_type == TableFilterType::EXPRESSION_FILTER) {
+		auto &expr_filter = filter.Cast<ExpressionFilter>();
+		return Cost(*expr_filter.expr);
+	}
 	switch (filter.filter_type) {
 	case TableFilterType::DYNAMIC_FILTER:
 	case TableFilterType::OPTIONAL_FILTER:
@@ -243,17 +248,6 @@ idx_t ExpressionHeuristics::Cost(TableFilter &filter) {
 		}
 		return cost;
 	}
-	case TableFilterType::CONSTANT_COMPARISON: {
-		auto &constant_filter = filter.Cast<ConstantFilter>();
-		return ExpressionCost(constant_filter.constant.type().InternalType(), 1);
-	}
-	case TableFilterType::IS_NULL:
-	case TableFilterType::IS_NOT_NULL:
-		return 5;
-	case TableFilterType::STRUCT_EXTRACT: {
-		auto &struct_filter = filter.Cast<StructFilter>();
-		return Cost(*struct_filter.child_filter);
-	}
 	default:
 		return 1000;
 	}
@@ -273,10 +267,10 @@ vector<idx_t> ExpressionHeuristics::GetInitialOrder(const TableFilterSet &table_
 	};
 	vector<FilterCost> filter_costs;
 	idx_t filter_index = 0;
-	for (auto &entry : table_filters.filters) {
+	for (auto &entry : table_filters) {
 		FilterCost cost;
 		cost.index = filter_index;
-		cost.cost = Cost(*entry.second);
+		cost.cost = Cost(entry.Filter());
 		filter_costs.push_back(cost);
 		filter_index++;
 	}

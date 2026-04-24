@@ -58,7 +58,6 @@ projects/*
 #==============================================================================#
 # Autotools artifacts
 #==============================================================================#
-config/
 configure
 config-h.in
 autom4te.cache
@@ -324,7 +323,6 @@ benchmark/taxi/data/
 benchmark_results/
 duckdb_unittest_tempdir/
 grammar.y.tmp
-src/amalgamation/
 # single file compile
 amalgamation.cache
 dependencies.d
@@ -350,12 +348,12 @@ zig-cache/*
 
 # .db files
 *.db
-*.db.gz
 
 # local cmake extension config
 extension/extension_config_local.cmake
 
 # extension_external dir
+extension/external/
 extension_external
 
 # pyodide (emscripten python) build and test environment

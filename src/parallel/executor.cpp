@@ -8,6 +8,7 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_data.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
 #include "duckdb/parallel/pipeline_complete_event.hpp"
 #include "duckdb/parallel/pipeline_event.hpp"
@@ -373,6 +374,12 @@ void Executor::VerifyPipelines() {
 #endif
 }
 
+void Executor::Initialize(unique_ptr<PhysicalOperator> physical_plan_p) {
+	Reset();
+	owned_plan = std::move(physical_plan_p);
+	InitializeInternal(*owned_plan);
+}
+
 void Executor::Initialize(PhysicalOperator &plan) {
 	Reset();
 	InitializeInternal(plan);
@@ -426,20 +433,23 @@ void Executor::CancelTasks() {
 		lock_guard<mutex> elock(executor_lock);
 		// mark the query as cancelled so tasks will early-out
 		cancelled = true;
-		// destroy all pipelines, events and states
-		for (auto &rec_cte_ref : recursive_ctes) {
-			auto &rec_cte = rec_cte_ref.get().Cast<PhysicalRecursiveCTE>();
-			rec_cte.recursive_meta_pipeline.reset();
-		}
-		pipelines.clear();
-		root_pipelines.clear();
 		to_be_rescheduled_tasks.clear();
-		events.clear();
 	}
-	// Take all pending tasks and execute them until they cancel
+	// Drain all tasks first — they hold references to pipelines/events/states,
+	// so those must stay alive until all tasks have completed
 	while (executor_tasks > 0) {
 		WorkOnTasks();
 	}
+	// Now safe to destroy pipelines, events and states — no tasks reference them
+	lock_guard<mutex> elock(executor_lock);
+	for (auto &rec_cte_ref : recursive_ctes) {
+		auto &rec_cte = rec_cte_ref.get().Cast<PhysicalRecursiveCTE>();
+		rec_cte.recursive_meta_pipeline.reset();
+	}
+	pipelines.clear();
+	root_pipelines.clear();
+	to_be_rescheduled_tasks.clear();
+	events.clear();
 }
 
 void Executor::WorkOnTasks() {
@@ -532,7 +542,9 @@ void Executor::AddToBeRescheduled(shared_ptr<Task> &task_p) {
 	if (to_be_rescheduled_tasks.find(task_p.get()) != to_be_rescheduled_tasks.end()) {
 		return;
 	}
-	to_be_rescheduled_tasks[task_p.get()] = std::move(task_p);
+	// Save raw pointer before move — evaluation order of operator[] key and assignment value is unspecified pre-C++17
+	auto raw_ptr = task_p.get();
+	to_be_rescheduled_tasks[raw_ptr] = std::move(task_p);
 }
 
 bool Executor::ExecutionIsFinished() {
@@ -593,7 +605,7 @@ PendingExecutionResult Executor::ExecuteTask(bool dry_run) {
 		if (!HasError()) {
 			// we (partially) processed a task and no exceptions were thrown
 			// give back control to the caller
-			if (task && DBConfig::GetConfig(context).options.scheduler_process_partial) {
+			if (task && Settings::Get<SchedulerProcessPartialSetting>(context)) {
 				auto &token = *task->token;
 				TaskScheduler::GetScheduler(context).ScheduleTask(token, task);
 				task.reset();
@@ -666,7 +678,7 @@ void Executor::PushError(ErrorData exception) {
 	// push the exception onto the stack
 	error_manager.PushError(std::move(exception));
 	// interrupt execution of any other pipelines that belong to this executor
-	context.interrupted = true;
+	context.interrupt_state = ClientInterruptState::INTERRUPTED;
 }
 
 bool Executor::HasError() {

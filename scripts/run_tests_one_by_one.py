@@ -63,6 +63,7 @@ parser.add_argument(
     type=valid_timeout,
 )
 parser.add_argument('--valgrind', action='store_true', help='Run the tests with valgrind', default=False)
+parser.add_argument("--test-config", action='store', help='Path to the test configuration file', default=None)
 
 args, extra_args = parser.parse_known_args()
 
@@ -197,6 +198,8 @@ def launch_test(test, list_of_tests=False):
             env['NO_DUPLICATING_HEADERS'] = '1'
         else:
             env['SUMMARIZE_FAILURES'] = '0'
+        if args.test_config:
+            test_cmd = test_cmd + ['--test-config', args.test_config]
         res = subprocess.run(test_cmd, stdout=unittest_stdout, stderr=unittest_stderr, timeout=timeout, env=env)
     except subprocess.TimeoutExpired as e:
         if list_of_tests:
@@ -210,21 +213,14 @@ def launch_test(test, list_of_tests=False):
         fail()
         return
 
-    stdout = res.stdout.decode('utf8') if not list_of_tests else ''
-    stderr = res.stderr.decode('utf8')
-
-    if len(stderr) > 0:
-        # when list_of_tests test name gets transformed, but we can get it from stderr
-        test_name = test[0] if not list_of_tests else get_test_name_from(stderr)
-        error_message = get_clean_error_message_from(stderr)
-        new_data = {"test": test_name, "return_code": res.returncode, "stdout": stdout, "stderr": error_message}
-        error_container.append(new_data)
-
     end = time.time()
 
     # join the background print thread
     is_active = False
     background_print_thread.join()
+
+    stdout = res.stdout.decode('utf8') if not list_of_tests else ''
+    stderr = res.stderr.decode('utf8')
 
     additional_data = ""
     if assertions:
@@ -236,6 +232,13 @@ def launch_test(test, list_of_tests=False):
         print(f'{test_case}	{end - start}')
     if res.returncode is None or res.returncode == 0:
         return
+
+    if len(stderr) > 0:
+        # when list_of_tests test name gets transformed, but we can get it from stderr
+        test_name = test[0] if not list_of_tests else get_test_name_from(stderr)
+        error_message = get_clean_error_message_from(stderr)
+        new_data = {"test": test_name, "return_code": res.returncode, "stdout": stdout, "stderr": error_message}
+        error_container.append(new_data)
 
     print("FAILURE IN RUNNING TEST")
     print(

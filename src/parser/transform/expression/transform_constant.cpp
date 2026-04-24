@@ -1,7 +1,9 @@
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/types/blob.hpp"
 #include "duckdb/common/types/decimal.hpp"
+#include "duckdb/common/types/bignum.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
@@ -14,7 +16,28 @@ unique_ptr<ConstantExpression> Transformer::TransformValue(duckdb_libpgquery::PG
 	case duckdb_libpgquery::T_PGInteger:
 		D_ASSERT(val.val.ival <= NumericLimits<int32_t>::Maximum());
 		return make_uniq<ConstantExpression>(Value::INTEGER((int32_t)val.val.ival));
-	case duckdb_libpgquery::T_PGBitString: // FIXME: this should actually convert to BLOB
+	case duckdb_libpgquery::T_PGBitString: {
+		string bit_string(val.val.str);
+		if (bit_string.empty() || bit_string[0] != 'x') {
+			return make_uniq<ConstantExpression>(Value(string(val.val.str)));
+		}
+		// X'...' hex literal: val.val.str = "xFF..." (lowercase 'x' prefix + hex digits)
+		const char *hex = bit_string.c_str() + 1; // skip 'x' prefix
+		idx_t hex_len = bit_string.size() - 1;
+		if (hex_len % 2 != 0) {
+			throw ParserException("Hex string literal must have an even number of hex digits");
+		}
+		// Build \xHH-escaped string that Blob::ToBlob (via Value::BLOB) expects
+		idx_t blob_len = hex_len / 2;
+		string escaped;
+		escaped.reserve(blob_len * 4);
+		for (idx_t i = 0; i < hex_len; i += 2) {
+			escaped += "\\x";
+			escaped += hex[i];
+			escaped += hex[i + 1];
+		}
+		return make_uniq<ConstantExpression>(Value::BLOB(escaped));
+	}
 	case duckdb_libpgquery::T_PGString:
 		return make_uniq<ConstantExpression>(Value(string(val.val.str)));
 	case duckdb_libpgquery::T_PGFloat: {
@@ -61,6 +84,14 @@ unique_ptr<ConstantExpression> Transformer::TransformValue(duckdb_libpgquery::PG
 				// successfully cast to bigint: bigint value
 				return make_uniq<ConstantExpression>(Value::UHUGEINT(uhugeint_value));
 			}
+			// if that is not successful; try to cast as bignum for very large integers
+			// this preserves precision for integers that exceed uhugeint limits
+			try {
+				auto bignum_str = Bignum::VarcharToBignum(str_val);
+				return make_uniq<ConstantExpression>(Value::BIGNUM(bignum_str));
+			} catch (const ConversionException &) {
+				// if bignum parsing fails (e.g., invalid format), continue to decimal or double fallback
+			}
 		}
 		idx_t decimal_offset = val.val.str[0] == '-' ? 3 : 2;
 		if (try_cast_as_decimal && decimal_position.IsValid() &&
@@ -93,92 +124,6 @@ unique_ptr<ParsedExpression> Transformer::TransformConstant(duckdb_libpgquery::P
 	auto constant = TransformValue(c.val);
 	SetQueryLocation(*constant, c.location);
 	return std::move(constant);
-}
-
-bool Transformer::ConstructConstantFromExpression(const ParsedExpression &expr, Value &value) {
-	// We have to construct it like this because we don't have the ClientContext for binding/executing the expr here
-	switch (expr.GetExpressionType()) {
-	case ExpressionType::FUNCTION: {
-		auto &function = expr.Cast<FunctionExpression>();
-		if (function.function_name == "struct_pack") {
-			unordered_set<string> unique_names;
-			child_list_t<Value> values;
-			values.reserve(function.children.size());
-			for (const auto &child : function.children) {
-				if (!unique_names.insert(child->GetAlias()).second) {
-					throw BinderException("Duplicate struct entry name \"%s\"", child->GetAlias());
-				}
-				Value child_value;
-				if (!ConstructConstantFromExpression(*child, child_value)) {
-					return false;
-				}
-				values.emplace_back(child->GetAlias(), std::move(child_value));
-			}
-			value = Value::STRUCT(std::move(values));
-			return true;
-		} else if (function.function_name == "list_value") {
-			vector<Value> values;
-			values.reserve(function.children.size());
-			for (const auto &child : function.children) {
-				Value child_value;
-				if (!ConstructConstantFromExpression(*child, child_value)) {
-					return false;
-				}
-				values.emplace_back(std::move(child_value));
-			}
-
-			// figure out child type
-			LogicalType child_type(LogicalTypeId::SQLNULL);
-			for (auto &child_value : values) {
-				child_type = LogicalType::ForceMaxLogicalType(child_type, child_value.type());
-			}
-
-			// finally create the list
-			value = Value::LIST(child_type, values);
-			return true;
-		} else if (function.function_name == "map") {
-			Value keys;
-			if (!ConstructConstantFromExpression(*function.children[0], keys)) {
-				return false;
-			}
-
-			Value values;
-			if (!ConstructConstantFromExpression(*function.children[1], values)) {
-				return false;
-			}
-
-			vector<Value> keys_unpacked = ListValue::GetChildren(keys);
-			vector<Value> values_unpacked = ListValue::GetChildren(values);
-
-			value = Value::MAP(ListType::GetChildType(keys.type()), ListType::GetChildType(values.type()),
-			                   keys_unpacked, values_unpacked);
-			return true;
-		} else {
-			return false;
-		}
-	}
-	case ExpressionType::VALUE_CONSTANT: {
-		auto &constant = expr.Cast<ConstantExpression>();
-		value = constant.value;
-		return true;
-	}
-	case ExpressionType::OPERATOR_CAST: {
-		auto &cast = expr.Cast<CastExpression>();
-		Value dummy_value;
-		if (!ConstructConstantFromExpression(*cast.child, dummy_value)) {
-			return false;
-		}
-
-		string error_message;
-		if (!dummy_value.DefaultTryCastAs(cast.cast_type, value, &error_message)) {
-			throw ConversionException("Unable to cast %s to %s", dummy_value.ToString(),
-			                          EnumUtil::ToString(cast.cast_type.id()));
-		}
-		return true;
-	}
-	default:
-		return false;
-	}
 }
 
 } // namespace duckdb

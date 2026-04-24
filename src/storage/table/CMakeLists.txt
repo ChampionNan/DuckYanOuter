@@ -8,12 +8,14 @@ add_library_unity(
   column_data_checkpointer.cpp
   column_data.cpp
   column_segment.cpp
+  geo_column_data.cpp
   array_column_data.cpp
   list_column_data.cpp
   in_memory_checkpoint.cpp
   update_segment.cpp
   persistent_table_data.cpp
   row_id_column_data.cpp
+  row_number_column_data.cpp
   row_group.cpp
   row_group_collection.cpp
   row_group_reorderer.cpp

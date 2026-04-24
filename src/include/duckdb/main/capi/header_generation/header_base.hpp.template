@@ -132,6 +132,8 @@ typedef enum DUCKDB_TYPE {
 	DUCKDB_TYPE_INTEGER_LITERAL = 38,
 	// duckdb_time_ns (nanoseconds)
 	DUCKDB_TYPE_TIME_NS = 39,
+	// GEOMETRY type, WKB blob
+	DUCKDB_TYPE_GEOMETRY = 40,
 } duckdb_type;
 
 //! An enum over the returned state of different functions.
@@ -902,7 +904,7 @@ struct duckdb_extension_access {
 	//! Indicate that an error has occurred.
 	void (*set_error)(duckdb_extension_info info, const char *error);
 	//! Fetch the database on which to register the extension.
-	duckdb_database (*get_database)(duckdb_extension_info info);
+	duckdb_database *(*get_database)(duckdb_extension_info info);
 	//! Fetch the API struct pointer.
 	const void *(*get_api)(duckdb_extension_info info, const char *version);
 };

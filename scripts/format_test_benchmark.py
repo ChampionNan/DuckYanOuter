@@ -7,7 +7,7 @@ from pathlib import Path
 
 def open_utf8(file_path, mode):
     """Open a file with UTF-8 encoding."""
-    return open(file_path, mode, encoding='utf-8')
+    return open(file_path, mode, encoding='utf-8', errors='surrogateescape')
 
 
 def format_file_content(full_path, lines):
@@ -18,7 +18,7 @@ def format_file_content(full_path, lines):
 
     # Extract group name (use 'unknown' for stdin if no full_path, else derive from path)
     group_name = Path(full_path).parent.name if full_path != '-' else 'unknown'
-    new_path_line = f'# name: {full_path}\n'
+    new_path_line = f'# name: {Path(full_path).as_posix()}\n'
     new_group_line = f'# group: [{group_name}]\n'
 
     # Find description

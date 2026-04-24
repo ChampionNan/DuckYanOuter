@@ -24,7 +24,7 @@ struct SortedAggregateBindData : public FunctionData {
 	SortedAggregateBindData(ClientContext &context, Expressions &children, AggregateFunction &aggregate,
 	                        BindInfoPtr &bind_info, OrderBys &order_bys)
 	    : context(context), function(aggregate), bind_info(std::move(bind_info)),
-	      threshold(DBConfig::GetSetting<OrderedAggregateThresholdSetting>(context)) {
+	      threshold(Settings::Get<OrderedAggregateThresholdSetting>(context)) {
 		//	Describe the arguments.
 		for (const auto &child : children) {
 			buffered_cols.emplace_back(buffered_cols.size());
@@ -37,8 +37,8 @@ struct SortedAggregateBindData : public FunctionData {
 
 		//	The first sort column is the group number. It is prefixed onto the buffered data
 		sort_types.emplace_back(LogicalType::USMALLINT);
-		orders.emplace_back(BoundOrderByNode(OrderType::ASCENDING, OrderByNullType::NULLS_FIRST,
-		                                     make_uniq<BoundReferenceExpression>(sort_types.back(), 0U)));
+		orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_FIRST,
+		                    make_uniq<BoundReferenceExpression>(sort_types.back(), 0U));
 
 		// Determine whether we are sorted on all the arguments.
 		// Even if we are not, we want to share inputs for sorting.
@@ -302,7 +302,7 @@ struct SortedAggregateState {
 			FlushChunks(order_bind);
 		} else if (input_chunk) {
 			//	Still using data chunks
-			input_chunk->Append(input, true, &sel, nsel);
+			input_chunk->Append(input, sel, nsel, VectorAppendMode::ALLOW_RESIZE);
 		} else {
 			//	Still using linked lists
 			LinkedAppend(order_bind.buffered_funcs, aggr_input_data.allocator, input, input_linked, sel, nsel);
@@ -470,7 +470,7 @@ struct SortedAggregateFunction {
 		states.ToUnifiedFormat(count, svdata);
 
 		// Size the selection vector for each state.
-		auto sdata = UnifiedVectorFormat::GetDataNoConst<SortedAggregateState *>(svdata);
+		auto sdata = UnifiedVectorFormat::GetData<SortedAggregateState *>(svdata);
 		for (idx_t i = 0; i < count; ++i) {
 			auto sidx = svdata.sel->get_index(i);
 			auto order_state = sdata[sidx];
@@ -486,7 +486,7 @@ struct SortedAggregateFunction {
 			if (!order_state->offset) {
 				//	First one
 				order_state->offset = start;
-				order_state->sel.Initialize(sel_data.data() + order_state->offset);
+				order_state->sel.Initialize(sel_data.data() + order_state->offset, count - order_state->offset);
 				start += order_state->nsel;
 			}
 			sel_data[order_state->offset++] = UnsafeNumericCast<sel_t>(sidx);
@@ -544,11 +544,11 @@ struct SortedAggregateFunction {
 		auto update = aggr.GetStateUpdateCallback();
 		auto finalize = aggr.GetStateFinalizeCallback();
 
-		auto sdata = FlatVector::GetData<SortedAggregateState *>(states);
+		auto sdata = states.Values<SortedAggregateState *>(count);
 
 		vector<idx_t> state_unprocessed(count, 0);
 		for (idx_t i = 0; i < count; ++i) {
-			state_unprocessed[i] = sdata[i]->count;
+			state_unprocessed[i] = sdata[i].GetValueUnsafe()->count;
 		}
 
 		ThreadContext thread(client);
@@ -566,7 +566,7 @@ struct SortedAggregateFunction {
 		idx_t sorted = 0;
 		for (idx_t finalized = 0; finalized < count;) {
 			if (unsorted_count < order_bind.threshold) {
-				auto state = sdata[finalized];
+				auto state = sdata[finalized].GetValueUnsafe();
 				prefixed.Reset();
 				prefixed.data[0].Reference(Value::USMALLINT(UnsafeNumericCast<uint16_t>(finalized)));
 				OperatorSinkInput sink {*global_sink, *local_sink, interrupt};
@@ -732,7 +732,7 @@ void FunctionBinder::BindSortedAggregate(ClientContext &context, BoundWindowExpr
 			const auto type = order.type;
 			const auto null_order = order.null_order;
 			auto expression = order.expression->Copy();
-			expr.arg_orders.emplace_back(BoundOrderByNode(type, null_order, std::move(expression)));
+			expr.arg_orders.emplace_back(type, null_order, std::move(expression));
 		}
 	}
 

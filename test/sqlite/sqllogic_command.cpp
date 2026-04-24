@@ -14,9 +14,11 @@
 #include "sqllogic_test_logger.hpp"
 #include "catch.hpp"
 
-#include <list>
-#include <thread>
+#include <algorithm>
 #include <chrono>
+#include <list>
+#include <random>
+#include <thread>
 
 namespace duckdb {
 
@@ -24,9 +26,9 @@ static void query_break(int line) {
 	(void)line;
 }
 
-static Connection *GetConnection(SQLLogicTestRunner &runner, DuckDB &db,
+static Connection &GetConnection(SQLLogicTestRunner &runner, DuckDB &db,
                                  unordered_map<string, duckdb::unique_ptr<Connection>> &named_connection_map,
-                                 string con_name) {
+                                 const string &con_name) {
 	auto entry = named_connection_map.find(con_name);
 	if (entry == named_connection_map.end()) {
 		// not found: create a new connection
@@ -40,12 +42,12 @@ static Connection *GetConnection(SQLLogicTestRunner &runner, DuckDB &db,
 				FAIL("Startup queries provided via on_new_connection failed: " + res->GetError());
 			}
 		}
-		auto res = con.get();
+		auto &res = *con;
 
 		named_connection_map[con_name] = std::move(con);
 		return res;
 	}
-	return entry->second.get();
+	return *entry->second;
 }
 
 Command::Command(SQLLogicTestRunner &runner) : runner(runner) {
@@ -54,7 +56,7 @@ Command::Command(SQLLogicTestRunner &runner) : runner(runner) {
 Command::~Command() {
 }
 
-Connection *Command::CommandConnection(ExecuteContext &context) const {
+Connection &Command::CommandConnection(ExecuteContext &context) const {
 	if (connection_name.empty()) {
 		if (context.is_parallel) {
 			D_ASSERT(context.con);
@@ -73,11 +75,11 @@ Connection *Command::CommandConnection(ExecuteContext &context) const {
 				}
 			}
 
-			return context.con;
+			return *context.con;
 		}
 		D_ASSERT(!context.con);
 
-		return runner.con.get();
+		return *runner.con;
 	} else {
 		if (context.is_parallel) {
 			throw std::runtime_error("Named connections not supported in parallel loop");
@@ -144,18 +146,19 @@ bool CanRestart(Connection &conn) {
 	return true;
 }
 
-void Command::RestartDatabase(ExecuteContext &context, Connection *&connection, string sql_query) const {
+void Command::RestartDatabase(ExecuteContext &context, reference<Connection> &connection,
+                              const string &sql_query) const {
 	if (context.is_parallel) {
 		// cannot restart in parallel
 		return;
 	}
 	bool query_fail = false;
 	try {
-		connection->context->ParseStatements(sql_query);
+		connection.get().context->ParseStatements(sql_query);
 	} catch (...) {
 		query_fail = true;
 	}
-	bool can_restart = CanRestart(*connection);
+	bool can_restart = CanRestart(connection.get());
 	if (!query_fail && can_restart && !runner.skip_reload && !runner.dbpath.empty()) {
 		// We basically restart the database if no transaction is active and if the query is valid
 		auto command = make_uniq<RestartCommand>(runner, true);
@@ -164,7 +167,7 @@ void Command::RestartDatabase(ExecuteContext &context, Connection *&connection, 
 	}
 }
 
-unique_ptr<MaterializedQueryResult> Command::ExecuteQuery(ExecuteContext &context, Connection *connection,
+unique_ptr<MaterializedQueryResult> Command::ExecuteQuery(ExecuteContext &context, reference<Connection> connection,
                                                           string file_name, idx_t query_line) const {
 	query_break(query_line);
 
@@ -179,7 +182,7 @@ unique_ptr<MaterializedQueryResult> Command::ExecuteQuery(ExecuteContext &contex
 	try {
 #ifdef DUCKDB_ALTERNATIVE_VERIFY
 		parameters.output_type = QueryResultOutputType::ALLOW_STREAMING;
-		auto ccontext = connection->context;
+		auto ccontext = connection.get().context;
 		auto result = ccontext->Query(context.sql_query, parameters);
 		if (result->type == QueryResultType::STREAM_RESULT) {
 			auto &stream_result = result->Cast<StreamQueryResult>();
@@ -189,7 +192,7 @@ unique_ptr<MaterializedQueryResult> Command::ExecuteQuery(ExecuteContext &contex
 			return unique_ptr_cast<QueryResult, MaterializedQueryResult>(std::move(result));
 		}
 #else
-		auto res = connection->context->Query(context.sql_query, parameters);
+		auto res = connection.get().context->Query(context.sql_query, parameters);
 		return unique_ptr_cast<QueryResult, MaterializedQueryResult>(std::move(res));
 #endif
 	} catch (std::exception &ex) {
@@ -322,6 +325,9 @@ LoopCommand::LoopCommand(SQLLogicTestRunner &runner, LoopDefinition definition_p
     : Command(runner), definition(std::move(definition_p)) {
 }
 
+ContinueCommand::ContinueCommand(SQLLogicTestRunner &runner) : Command(runner) {
+}
+
 ModeCommand::ModeCommand(SQLLogicTestRunner &runner, string parameter_p)
     : Command(runner), parameter(std::move(parameter_p)) {
 }
@@ -361,7 +367,7 @@ static void ParallelExecuteLoop(ParallelExecuteContext *execute_context) {
 		Connection con(*runner.db);
 		// create a new parallel execute context
 		auto &running_loops = execute_context->active_loops;
-		ExecuteContext context(&con, std::move(running_loops));
+		ExecuteContext context(con, std::move(running_loops));
 		for (auto &command : execute_context->loop_commands) {
 			execute_context->error_file = command->file_name;
 			execute_context->error_line = command->query_line;
@@ -407,29 +413,46 @@ void LoopCommand::ExecuteInternal(ExecuteContext &context) const {
 				break;
 			}
 		}
-		std::random_shuffle(loop_indexes.begin(), loop_indexes.end());
+		std::random_device rd;
+		std::mt19937 g(rd());
+		std::shuffle(loop_indexes.begin(), loop_indexes.end(), g);
 
 		// parallel loop: launch threads
 		std::list<ParallelExecuteContext> contexts;
-		for (auto &loop_index : loop_indexes) {
-			loop_def.loop_idx = loop_index;
+		for (auto &parallel_loop_idx : loop_indexes) {
+			loop_def.loop_idx = parallel_loop_idx;
 			auto running_loops = context.running_loops;
 			running_loops.emplace_back(loop_def);
 			contexts.emplace_back(runner, loop_commands, std::move(running_loops));
 		}
+		auto &test_config = TestConfiguration::Get();
+		auto max_threads_config = test_config.GetMaxTestThreads();
+		idx_t max_threads =
+		    max_threads_config.IsValid() ? max_threads_config.GetIndex() : NumericLimits<idx_t>::Maximum();
+		max_threads = MaxValue<idx_t>(max_threads, 1);
+
 		std::list<std::thread> threads;
-		for (auto &context : contexts) {
-			threads.emplace_back(ParallelExecuteLoop, &context);
+		idx_t finished_thread_idx = 0;
+		auto context_it = contexts.begin();
+		while (context_it != contexts.end()) {
+			// launch threads
+			for (; context_it != contexts.end() && threads.size() - finished_thread_idx < max_threads; ++context_it) {
+				auto &execute_context = *context_it;
+				threads.emplace_back(ParallelExecuteLoop, &execute_context);
+			}
+			// wait for active threads to finish
+			for (auto it = std::next(threads.begin(), static_cast<int64_t>(finished_thread_idx)); it != threads.end();
+			     ++it) {
+				it->join();
+				finished_thread_idx++;
+			}
 		}
-		for (auto &thread : threads) {
-			thread.join();
-		}
-		for (auto &context : contexts) {
-			if (!context.success) {
-				if (!context.error_message.empty()) {
-					FAIL(context.error_message);
+		for (auto &execute_context : contexts) {
+			if (!execute_context.success) {
+				if (!execute_context.error_message.empty()) {
+					FAIL(execute_context.error_message);
 				} else {
-					FAIL_LINE(context.error_file, context.error_line, 0);
+					FAIL_LINE(execute_context.error_file, execute_context.error_line, 0);
 				}
 			}
 		}
@@ -437,9 +460,15 @@ void LoopCommand::ExecuteInternal(ExecuteContext &context) const {
 		bool finished = false;
 		while (!finished && !runner.finished_processing_file) {
 			// execute the current iteration of the loop
+			idx_t loop_index = context.running_loops.size();
 			context.running_loops.push_back(loop_def);
+
 			for (auto &statement : loop_commands) {
 				statement->Execute(context);
+				if (context.running_loops[loop_index].is_skipped) {
+					//! Executed a CONTINUE statement
+					break;
+				}
 			}
 			context.running_loops.pop_back();
 			loop_def.loop_idx++;
@@ -449,6 +478,16 @@ void LoopCommand::ExecuteInternal(ExecuteContext &context) const {
 			}
 		}
 	}
+}
+
+void ContinueCommand::ExecuteInternal(ExecuteContext &context) const {
+	D_ASSERT(!context.running_loops.empty());
+	auto &deepest_loop = context.running_loops.back();
+	deepest_loop.is_skipped = true;
+}
+
+bool ContinueCommand::SupportsConcurrent() const {
+	return false;
 }
 
 bool LoopCommand::SupportsConcurrent() const {
@@ -461,7 +500,7 @@ bool LoopCommand::SupportsConcurrent() const {
 }
 
 void Query::ExecuteInternal(ExecuteContext &context) const {
-	auto connection = CommandConnection(context);
+	reference<Connection> connection = CommandConnection(context);
 
 	{
 		SQLLogicTestLogger logger(context, *this);
@@ -497,6 +536,7 @@ void RestartCommand::ExecuteInternal(ExecuteContext &context) const {
 	}
 	// We save the main connection configurations to pass it to the new connection
 	runner.config->options = runner.con->context->db->config.options;
+	runner.config->user_settings = runner.con->context->db->config.user_settings;
 	auto client_config = runner.con->context->config;
 	auto catalog_search_paths = runner.con->context->client_data->catalog_search_path->GetSetPaths();
 	string low_query_writer_path;
@@ -573,7 +613,7 @@ SleepUnit SleepCommand::ParseUnit(const string &unit) {
 }
 
 void Statement::ExecuteInternal(ExecuteContext &context) const {
-	auto connection = CommandConnection(context);
+	auto &connection = CommandConnection(context);
 	{
 		SQLLogicTestLogger logger(context, *this);
 		if (runner.output_result_mode || runner.debug_mode) {

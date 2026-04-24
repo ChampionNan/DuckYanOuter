@@ -1,6 +1,7 @@
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/storage/table/list_column_data.hpp"
 #include "duckdb/storage/statistics/list_stats.hpp"
-#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/storage/table/column_checkpoint_state.hpp"
 #include "duckdb/storage/table/append_state.hpp"
@@ -92,11 +93,6 @@ idx_t ListColumnData::Scan(TransactionData transaction, idx_t vector_index, Colu
 	return ScanCount(state, result, scan_count);
 }
 
-idx_t ListColumnData::ScanCommitted(idx_t vector_index, ColumnScanState &state, Vector &result, bool allow_updates,
-                                    idx_t scan_count) {
-	return ScanCount(state, result, scan_count);
-}
-
 idx_t ListColumnData::ScanCount(ColumnScanState &state, Vector &result, idx_t count, idx_t result_offset) {
 	if (result_offset > 0) {
 		throw InternalException("ListColumnData::ScanCount not supported with result_offset > 0");
@@ -112,20 +108,18 @@ idx_t ListColumnData::ScanCount(ColumnScanState &state, Vector &result, idx_t co
 	D_ASSERT(scan_count > 0);
 	validity->ScanCount(state.child_states[0], result, count);
 
-	UnifiedVectorFormat offsets;
-	offset_vector.ToUnifiedFormat(scan_count, offsets);
-	auto data = UnifiedVectorFormat::GetData<uint64_t>(offsets);
-	auto last_entry = data[offsets.sel->get_index(scan_count - 1)];
+	auto data = offset_vector.Values<uint64_t>(scan_count);
+	auto last_entry = data[scan_count - 1].GetValueUnsafe();
 
 	// shift all offsets so they are 0 at the first entry
-	auto result_data = FlatVector::GetData<list_entry_t>(result);
+	auto result_data = FlatVector::Writer<list_entry_t>(result, scan_count);
 	auto base_offset = state.last_offset;
 	idx_t current_offset = 0;
 	for (idx_t i = 0; i < scan_count; i++) {
-		auto offset_index = offsets.sel->get_index(i);
-		result_data[i].offset = current_offset;
-		result_data[i].length = data[offset_index] - current_offset - base_offset;
-		current_offset += result_data[i].length;
+		auto offset = data[i].GetValueUnsafe();
+		auto length = offset - current_offset - base_offset;
+		result_data.WriteValue(list_entry_t(current_offset, length));
+		current_offset += length;
 	}
 
 	D_ASSERT(last_entry >= base_offset);
@@ -133,7 +127,7 @@ idx_t ListColumnData::ScanCount(ColumnScanState &state, Vector &result, idx_t co
 	ListVector::Reserve(result, child_scan_count);
 
 	if (child_scan_count > 0) {
-		auto &child_entry = ListVector::GetEntry(result);
+		auto &child_entry = ListVector::GetChildMutable(result);
 		if (child_entry.GetType().InternalType() != PhysicalType::STRUCT &&
 		    child_entry.GetType().InternalType() != PhysicalType::ARRAY &&
 		    state.child_states[1].offset_in_column + child_scan_count > child_column->GetMaxEntry()) {
@@ -189,12 +183,9 @@ void ListColumnData::InitializeAppend(ColumnAppendState &state) {
 
 void ListColumnData::Append(BaseStatistics &stats, ColumnAppendState &state, Vector &vector, idx_t count) {
 	D_ASSERT(count > 0);
-	UnifiedVectorFormat list_data;
-	vector.ToUnifiedFormat(count, list_data);
-	auto &list_validity = list_data.validity;
 
 	// construct the list_entry_t entries to append to the column data
-	auto input_offsets = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto input_offsets = vector.Values<list_entry_t>(count);
 	auto start_offset = child_column->GetMaxEntry();
 	idx_t child_count = 0;
 
@@ -202,33 +193,34 @@ void ListColumnData::Append(BaseStatistics &stats, ColumnAppendState &state, Vec
 	auto append_offsets = unique_ptr<uint64_t[]>(new uint64_t[count]);
 	bool child_contiguous = true;
 	for (idx_t i = 0; i < count; i++) {
-		auto input_idx = list_data.sel->get_index(i);
-		if (list_validity.RowIsValid(input_idx)) {
-			auto &input_list = input_offsets[input_idx];
-			if (input_list.offset != child_count) {
-				child_contiguous = false;
-			}
-			append_offsets[i] = start_offset + child_count + input_list.length;
-			child_count += input_list.length;
-		} else {
+		auto list_entry = input_offsets[i];
+		if (!list_entry.IsValid()) {
 			append_mask.SetInvalid(i);
 			append_offsets[i] = start_offset + child_count;
+			continue;
 		}
+		auto &input_list = list_entry.GetValue();
+		if (input_list.offset != child_count) {
+			child_contiguous = false;
+		}
+		append_offsets[i] = start_offset + child_count + input_list.length;
+		child_count += input_list.length;
 	}
-	auto &list_child = ListVector::GetEntry(vector);
-	Vector child_vector(list_child);
+	auto &list_child = ListVector::GetChild(vector);
+	Vector child_vector(Vector::Ref(list_child));
 	if (!child_contiguous) {
 		// if the child of the list vector is a non-contiguous vector (i.e. list elements are repeating or have gaps)
 		// we first push a selection vector and flatten the child vector to turn it into a contiguous vector
 		SelectionVector child_sel(child_count);
 		idx_t current_count = 0;
 		for (idx_t i = 0; i < count; i++) {
-			auto input_idx = list_data.sel->get_index(i);
-			if (list_validity.RowIsValid(input_idx)) {
-				auto &input_list = input_offsets[input_idx];
-				for (idx_t list_idx = 0; list_idx < input_list.length; list_idx++) {
-					child_sel.set_index(current_count++, input_list.offset + list_idx);
-				}
+			auto list_entry = input_offsets[i];
+			if (!list_entry.IsValid()) {
+				continue;
+			}
+			auto &input_list = list_entry.GetValue();
+			for (idx_t list_idx = 0; list_idx < input_list.length; list_idx++) {
+				child_sel.set_index(current_count++, input_list.offset + list_idx);
 			}
 		}
 		D_ASSERT(current_count == child_count);
@@ -266,12 +258,12 @@ idx_t ListColumnData::Fetch(ColumnScanState &state, row_t row_id, Vector &result
 	throw NotImplementedException("List Fetch");
 }
 
-void ListColumnData::Update(TransactionData transaction, DataTable &data_table, idx_t column_index,
+void ListColumnData::Update(TransactionData transaction, DuckTableEntry &table_entry, idx_t column_index,
                             Vector &update_vector, row_t *row_ids, idx_t update_count, idx_t row_group_start) {
 	throw NotImplementedException("List Update is not supported.");
 }
 
-void ListColumnData::UpdateColumn(TransactionData transaction, DataTable &data_table,
+void ListColumnData::UpdateColumn(TransactionData transaction, DuckTableEntry &table_entry,
                                   const vector<column_t> &column_path, Vector &update_vector, row_t *row_ids,
                                   idx_t update_count, idx_t depth, idx_t row_group_start) {
 	throw NotImplementedException("List Update Column is not supported");
@@ -297,8 +289,8 @@ void ListColumnData::FetchRow(TransactionData transaction, ColumnFetchState &sta
 	auto end_offset = FetchListOffset(UnsafeNumericCast<idx_t>(row_id));
 	validity->FetchRow(transaction, *state.child_states[0], storage_index, row_id, result, result_idx);
 
-	auto &validity_mask = FlatVector::Validity(result);
-	auto list_data = FlatVector::GetData<list_entry_t>(result);
+	auto &validity_mask = FlatVector::ValidityMutable(result);
+	auto list_data = FlatVector::GetDataMutable<list_entry_t>(result);
 	auto &list_entry = list_data[result_idx];
 	// set the list entry offset to the size of the current list
 	list_entry.offset = ListVector::GetListSize(result);
@@ -330,6 +322,14 @@ void ListColumnData::VisitBlockIds(BlockIdVisitor &visitor) const {
 	ColumnData::VisitBlockIds(visitor);
 	validity->VisitBlockIds(visitor);
 	child_column->VisitBlockIds(visitor);
+}
+
+const BaseStatistics &ListColumnData::GetChildStats(const ColumnData &child) const {
+	if (!RefersToSameObject(child, *child_column)) {
+		throw InternalException("ListColumnData::GetChildStats provided column data is not a child of this list");
+	}
+	auto &stats = GetStatisticsRef();
+	return ListStats::GetChildStats(stats);
 }
 
 void ListColumnData::SetValidityData(shared_ptr<ValidityColumnData> validity_p) {
@@ -396,10 +396,11 @@ unique_ptr<ColumnCheckpointState> ListColumnData::CreateCheckpointState(const Ro
 }
 
 unique_ptr<ColumnCheckpointState> ListColumnData::Checkpoint(const RowGroup &row_group,
-                                                             ColumnCheckpointInfo &checkpoint_info) {
-	auto base_state = ColumnData::Checkpoint(row_group, checkpoint_info);
-	auto validity_state = validity->Checkpoint(row_group, checkpoint_info);
-	auto child_state = child_column->Checkpoint(row_group, checkpoint_info);
+                                                             ColumnCheckpointInfo &checkpoint_info,
+                                                             const BaseStatistics &old_stats) {
+	auto base_state = ColumnData::Checkpoint(row_group, checkpoint_info, old_stats);
+	auto validity_state = validity->Checkpoint(row_group, checkpoint_info, old_stats);
+	auto child_state = child_column->Checkpoint(row_group, checkpoint_info, ListStats::GetChildStats(old_stats));
 
 	auto &checkpoint_state = base_state->Cast<ListColumnCheckpointState>();
 	checkpoint_state.validity_state = std::move(validity_state);

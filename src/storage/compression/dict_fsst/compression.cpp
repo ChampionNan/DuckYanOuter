@@ -1,5 +1,4 @@
 #include "duckdb/storage/compression/dict_fsst/compression.hpp"
-#include "duckdb/storage/segment/uncompressed.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "fsst.h"
 #include "duckdb/common/fsst.hpp"
@@ -437,11 +436,7 @@ static inline bool AddToDictionary(DictFSSTCompressionState &state, const string
 	// Add it to the dictionary
 	state.dictionary_indices.push_back(state.dict_count);
 	if (APPEND_STATE == DictionaryAppendState::ENCODED) {
-		if (str.IsInlined()) {
-			state.dictionary_encoding_buffer.push_back(str);
-		} else {
-			state.dictionary_encoding_buffer.push_back(state.uncompressed_dictionary_copy.AddBlob(str));
-		}
+		state.dictionary_encoding_buffer.push_back(state.uncompressed_dictionary_copy.AddBlob(str));
 		if (!state.to_encode_string_sum) {
 			//! As specified in fsst.h
 			state.to_encode_string_sum = 7;

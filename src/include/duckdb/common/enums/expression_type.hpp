@@ -89,6 +89,7 @@ enum class ExpressionType : uint8_t {
 	// Window Functions
 	// -----------------------------
 	WINDOW_AGGREGATE = 110,
+	WINDOW_FUNCTION = 111,
 
 	WINDOW_RANK = 120,
 	WINDOW_RANK_DENSE = 121,
@@ -138,6 +139,7 @@ enum class ExpressionType : uint8_t {
 	FUNCTION_REF = 204,
 	TABLE_REF = 205,
 	LAMBDA_REF = 206,
+	TYPE = 207,
 
 	// -----------------------------
 	// Miscellaneous
@@ -180,6 +182,7 @@ enum class ExpressionClass : uint8_t {
 	POSITIONAL_REFERENCE = 18,
 	BETWEEN = 19,
 	LAMBDA_REF = 20,
+	TYPE = 21,
 	//===--------------------------------------------------------------------===//
 	// Bound Expressions
 	//===--------------------------------------------------------------------===//

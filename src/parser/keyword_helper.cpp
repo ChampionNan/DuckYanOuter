@@ -4,15 +4,15 @@
 
 namespace duckdb {
 
-bool KeywordHelper::IsKeyword(const string &text) {
-	return Parser::IsKeyword(text) != KeywordCategory::KEYWORD_NONE;
+bool KeywordHelper::IsKeyword(const string &text, KeywordCategory category) {
+	return Parser::IsKeyword(text) != category;
 }
 
 KeywordCategory KeywordHelper::KeywordCategoryType(const string &text) {
 	return Parser::IsKeyword(text);
 }
 
-bool KeywordHelper::RequiresQuotes(const string &text, bool allow_caps) {
+bool KeywordHelper::RequiresQuotes(const string &text, bool allow_caps, KeywordCategory category) {
 	for (size_t i = 0; i < text.size(); i++) {
 		if (i > 0 && (text[i] >= '0' && text[i] <= '9')) {
 			continue;
@@ -30,7 +30,7 @@ bool KeywordHelper::RequiresQuotes(const string &text, bool allow_caps) {
 		}
 		return true;
 	}
-	return IsKeyword(text);
+	return IsKeyword(text, category);
 }
 
 string KeywordHelper::EscapeQuotes(const string &text, char quote) {
@@ -38,13 +38,13 @@ string KeywordHelper::EscapeQuotes(const string &text, char quote) {
 }
 
 string KeywordHelper::WriteQuoted(const string &text, char quote) {
-	// 1. Escapes all occurences of 'quote' by doubling them (escape in SQL)
+	// 1. Escapes all occurrences of 'quote' by doubling them (escape in SQL)
 	// 2. Adds quotes around the string
 	return string(1, quote) + EscapeQuotes(text, quote) + string(1, quote);
 }
 
-string KeywordHelper::WriteOptionallyQuoted(const string &text, char quote, bool allow_caps) {
-	if (!RequiresQuotes(text, allow_caps)) {
+string KeywordHelper::WriteOptionallyQuoted(const string &text, char quote, bool allow_caps, KeywordCategory category) {
+	if (!RequiresQuotes(text, allow_caps, category)) {
 		return text;
 	}
 	return WriteQuoted(text, quote);

@@ -3,7 +3,6 @@
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 using namespace duckdb;
-using namespace std;
 
 // Dummy TableInOutFunction that:
 // - sums all INTEGER values in each row
@@ -51,19 +50,20 @@ struct ThrottlingSum {
 			local_state.row_sums.push_back(sum);
 		}
 
-		if (PhysicalOperator::OperatorCachingAllowed(context)) {
+		if (PhysicalOperator::SelectOperatorCachingMode(context) == OperatorCachingMode::UNORDERED) {
 			// Caching is allowed
 			if (local_state.current_idx < local_state.row_sums.size()) {
 				output.SetCardinality(1);
-				output.SetValue(0, 0, Value(local_state.row_sums[local_state.current_idx++]));
+				output.data[0].Append(Value(local_state.row_sums[local_state.current_idx++]));
 			} else {
 				output.SetCardinality(0);
 			}
 		} else {
 			// Caching is not allowed, we should emit everything!
 			auto to_emit = local_state.row_sums.size() - local_state.current_idx;
+			auto &sum_col = output.data[0];
 			for (idx_t i = 0; i < to_emit; i++) {
-				output.SetValue(0, i, Value(local_state.row_sums[local_state.current_idx + i]));
+				sum_col.Append(Value(local_state.row_sums[local_state.current_idx + i]));
 			}
 			local_state.current_idx += to_emit;
 			output.SetCardinality(to_emit);
@@ -78,7 +78,7 @@ struct ThrottlingSum {
 
 		if (local_state.current_idx < local_state.row_sums.size()) {
 			output.SetCardinality(1);
-			output.SetValue(0, 0, Value(local_state.row_sums[local_state.current_idx++]));
+			output.data[0].Append(Value(local_state.row_sums[local_state.current_idx++]));
 			return OperatorFinalizeResultType::HAVE_MORE_OUTPUT;
 		} else {
 			return OperatorFinalizeResultType::FINISHED;
