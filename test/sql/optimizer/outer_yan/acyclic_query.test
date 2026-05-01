@@ -1,0 +1,5 @@
+# name: test/sql/optimizer/outer_yan/acyclic_query.test
+# description: OuterYan optimizer — acyclic queries (mix of inner + outer joins) should match
+# group: [outer_yan]
+
+# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.

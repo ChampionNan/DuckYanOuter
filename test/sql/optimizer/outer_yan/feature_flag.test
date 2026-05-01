@@ -1,0 +1,5 @@
+# name: test/sql/optimizer/outer_yan/feature_flag.test
+# description: OuterYan optimizer — toggling the feature flag reverts to existing JOIN_ORDER behavior
+# group: [outer_yan]
+
+# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.

@@ -1,0 +1,6 @@
+# name: test/sql/optimizer/outer_yan/fallback.test
+# description: OuterYan optimizer — non-applicable queries fall back to JOIN_ORDER unchanged
+#              (cyclic graphs, set ops, correlated subqueries, non-null-rejecting predicates)
+# group: [outer_yan]
+
+# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.

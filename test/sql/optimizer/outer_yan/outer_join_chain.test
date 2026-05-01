@@ -1,0 +1,5 @@
+# name: test/sql/optimizer/outer_yan/outer_join_chain.test
+# description: OuterYan optimizer — LEFT/RIGHT/FULL OUTER join chain reordering
+# group: [outer_yan]
+
+# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.

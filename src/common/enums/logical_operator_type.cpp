@@ -24,6 +24,10 @@ string LogicalOperatorToString(LogicalOperatorType type) {
 		return "ASOF_JOIN";
 	case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN:
 		return "DEPENDENT_JOIN";
+	case LogicalOperatorType::LOGICAL_SJ_BUILD:
+		return "SJ_BUILD";
+	case LogicalOperatorType::LOGICAL_SJ_PROBE:
+		return "SJ_PROBE";
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 		return "COMPARISON_JOIN";
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:

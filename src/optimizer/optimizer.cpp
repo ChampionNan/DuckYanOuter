@@ -42,6 +42,10 @@
 #include "duckdb/optimizer/row_number_rewriter.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/optimizer/outer_join_simplification.hpp"
+#include "duckdb/optimizer/outer_yan/aggregate_pushdown_outer.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_dp.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_post.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_pre.hpp"
 #include "duckdb/optimizer/projection_pullup.hpp"
 #include "duckdb/optimizer/rule/predicate_factoring.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -239,12 +243,47 @@ void Optimizer::RunBuiltInOptimizers() {
 		outer_join_simplification.VisitOperator(*plan);
 	});
 
-	// then we perform the join ordering optimization
-	// this also rewrites cross products + filters into joins and performs filter pushdowns
-	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
-		JoinOrderOptimizer optimizer(context);
-		plan = optimizer.Optimize(std::move(plan));
+	// OuterYan — three-pass optimizer for acyclic CQs with inner / outer joins.
+	// `OuterYanPre` runs the applicability gate first and stores the result
+	// (true / false) in `outer_yan_active`. The remaining OuterYan passes
+	// (OuterYanDP, OuterYanPost) and the existing JOIN_ORDER pass branch on
+	// this single flag — they are mutually exclusive: when OuterYan is active
+	// JOIN_ORDER is skipped, otherwise OuterYanDP / OuterYanPost are skipped.
+	bool outer_yan_active = false;
+	RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
+		OuterYanPre outer_yan_pre(context);
+		auto applicability = outer_yan_pre.ApplicabilityCheck(*plan);
+		outer_yan_active = applicability.applicable;
+		if (outer_yan_active) {
+			plan = outer_yan_pre.Optimize(std::move(plan));
+		}
 	});
+
+	if (outer_yan_active) {
+		RunOptimizer(OptimizerType::OUTER_YAN_DP, [&]() {
+			OuterYanDP outer_yan_dp(context);
+			plan = outer_yan_dp.Optimize(std::move(plan));
+		});
+	} else {
+		// then we perform the join ordering optimization
+		// this also rewrites cross products + filters into joins and performs filter pushdowns
+		RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
+			JoinOrderOptimizer optimizer(context);
+			plan = optimizer.Optimize(std::move(plan));
+		});
+	}
+
+	if (outer_yan_active) {
+		RunOptimizer(OptimizerType::OUTER_YAN_POST, [&]() {
+			OuterYanPost outer_yan_post(context);
+			plan = outer_yan_post.Optimize(std::move(plan));
+		});
+
+		RunOptimizer(OptimizerType::AGGREGATE_PUSHDOWN_OUTER, [&]() {
+			AggregatePushdownOuter aggregate_pushdown_outer(binder, context);
+			plan = aggregate_pushdown_outer.Optimize(std::move(plan));
+		});
+	}
 
 	RunOptimizer(OptimizerType::JOIN_ELIMINATION, [&]() {
 		JoinElimination join_elimination;

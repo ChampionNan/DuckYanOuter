@@ -1,0 +1,6 @@
+# name: test/sql/optimizer/outer_yan/outer_join_aggregate.test
+# description: OuterYan optimizer — aggregation pushdown over outer-join chains;
+#              evaluation order forced to OJT post-order with output relation as root
+# group: [outer_yan]
+
+# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.

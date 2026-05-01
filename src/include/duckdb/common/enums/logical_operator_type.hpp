@@ -53,6 +53,11 @@ enum class LogicalOperatorType : uint8_t {
 	LOGICAL_ASOF_JOIN = 56,
 	LOGICAL_DEPENDENT_JOIN = 57,
 	// -----------------------------
+	// OuterYan
+	// -----------------------------
+	LOGICAL_SJ_BUILD = 60,
+	LOGICAL_SJ_PROBE = 61,
+	// -----------------------------
 	// SetOps
 	// -----------------------------
 	LOGICAL_UNION = 75,

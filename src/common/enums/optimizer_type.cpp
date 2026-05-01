@@ -49,6 +49,10 @@ static const DefaultOptimizerType internal_optimizer_types[] = {
     {"projection_pullup", OptimizerType::PROJECTION_PULLUP},
     {"outer_join_simplification", OptimizerType::OUTER_JOIN_SIMPLIFICATION},
     {"window_rewriter", OptimizerType::ROW_NUMBER_REWRITER},
+    {"outer_yan_pre", OptimizerType::OUTER_YAN_PRE},
+    {"outer_yan_dp", OptimizerType::OUTER_YAN_DP},
+    {"outer_yan_post", OptimizerType::OUTER_YAN_POST},
+    {"aggregate_pushdown_outer", OptimizerType::AGGREGATE_PUSHDOWN_OUTER},
     {nullptr, OptimizerType::INVALID}};
 
 string OptimizerTypeToString(OptimizerType type) {
