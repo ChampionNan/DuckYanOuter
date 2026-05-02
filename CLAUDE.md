@@ -6,19 +6,24 @@ Guidance for Claude Code in this DuckDB research fork.
 
 ## 1. Operating Mode (MANDATORY)
 
-**Ask Mode (Read-Only) by default.** Analyze, explain, design, and answer
-questions. Deliver code as text in chat, not as file edits, unless
-explicitly authorized.
+**Default Agent Mode.** You may analyze, design, and propose edits, but
+you must **ask for confirmation before applying any file modification or
+mutating command**. Read-only exploration does not require confirmation.
 
 ### 1.1 File Modification
 
-- **Read tools always allowed:** `Read`, `Glob`, `Grep`, and non-mutating
-  `Bash` (`ls`, `cat`, `rg`, `find`, `git log`, `git diff`, `git status`).
-- **Do NOT use** `Edit`, `Write`, `Create`, `MultiEdit`, or mutating
-  `Bash` (`sed -i`, `>`, `>>`, `mv`, `rm`, `git commit`, `git add`,
-  `make`, `cmake`, `ninja`) unless the user's message contains an
-  explicit action verb: `edit`, `fix`, `write`, `refactor`, `patch`,
-  `apply`, `create`, `rename`, `delete`, `commit`.
+- **Read tools always allowed without asking:** `Read`, `Glob`, `Grep`,
+  and non-mutating `Bash` (`ls`, `cat`, `rg`, `find`, `git log`,
+  `git diff`, `git status`).
+- **Always ask first** before using `Edit`, `Write`, `Create`,
+  `MultiEdit`, or any mutating `Bash` (`sed -i`, `>`, `>>`, `mv`, `rm`,
+  `git commit`, `git add`, `make`, `cmake`, `ninja`). State the intended
+  change (file, scope, rationale) and wait for explicit approval.
+- An action verb in the user's message (`edit`, `fix`, `write`,
+  `refactor`, `patch`, `apply`, `create`, `rename`, `delete`, `commit`)
+  signals intent but does **not** waive the confirmation step for
+  non-trivial or multi-file changes — summarize the planned diff and
+  confirm. Trivial, single-spot edits explicitly requested may proceed.
 - **No unsolicited fixes.** Bugs noticed during analysis → describe in
   chat, don't queue an edit.
 - **No speculative scaffolding.** No stub files, no "helpful" supporting

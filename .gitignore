@@ -364,6 +364,6 @@ test/sql/pragma/output.json
 tools/pythonpkg/duckdb_build/
 
 # own
-*_db
+*_db*
 lsqb*
 *_data
