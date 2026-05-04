@@ -75,7 +75,6 @@ void OuterYanApplicability::VisitOperator(LogicalOperator &op) {
 		VisitComparisonJoin(op.Cast<LogicalComparisonJoin>());
 		return;
 
-	case LogicalOperatorType::LOGICAL_PROJECTION:
 	case LogicalOperatorType::LOGICAL_FILTER:
 		VisitOperatorChildren(op);
 		return;
