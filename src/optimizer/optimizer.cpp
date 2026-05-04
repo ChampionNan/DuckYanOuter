@@ -51,6 +51,8 @@
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
 
+#include "duckdb/optimizer/operator_binding_printer.hpp"
+
 namespace duckdb {
 
 Optimizer::Optimizer(Binder &binder, ClientContext &context) : context(context), binder(binder), rewriter(context) {
@@ -249,6 +251,10 @@ void Optimizer::RunBuiltInOptimizers() {
 	// (OuterYanDP, OuterYanPost) and the existing JOIN_ORDER pass branch on
 	// this single flag — they are mutually exclusive: when OuterYan is active
 	// JOIN_ORDER is skipped, otherwise OuterYanDP / OuterYanPost are skipped.
+
+	// Debug format
+	// peratorBindingPrinter printer;
+	// printer.Print(plan, context);  // Prints to stdout
 	bool outer_yan_active = false;
 	RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
 		OuterYanPre outer_yan_pre(context);

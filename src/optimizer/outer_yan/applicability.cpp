@@ -10,7 +10,7 @@ namespace {
 
 void CollectColumnTables(const Expression &expr, unordered_set<idx_t> &tables) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-		tables.insert(expr.Cast<BoundColumnRefExpression>().binding.table_index);
+		tables.insert(expr.Cast<BoundColumnRefExpression>().binding.table_index.index);
 	}
 	ExpressionIterator::EnumerateChildren(
 	    expr, [&](const Expression &child) { CollectColumnTables(child, tables); });
