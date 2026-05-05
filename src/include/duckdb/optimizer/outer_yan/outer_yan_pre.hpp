@@ -10,7 +10,6 @@
 
 #include "duckdb/optimizer/outer_yan/applicability.hpp"
 #include "duckdb/optimizer/outer_yan/desimplification.hpp"
-#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
 #include "duckdb/optimizer/outer_yan/simplification.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
@@ -19,18 +18,15 @@ class ClientContext;
 
 //! OuterYanPre — first OuterYan pass.
 //!
-//! `Optimize` orchestrates the steps below. Tree conversions
-//! (LogicalPlan ↔ OT) delegate to the shared utilities in
-//! `tree_conversions.hpp`.
+//! `Optimize` orchestrates the steps below. Operates directly on the
+//! LogicalOperator tree — there is no separate Operator Tree IR.
 //!
 //! Step order:
 //!   1. ApplicabilityCheck   — gate; clears the OuterYan flag on failure.
-//!   2. LogicalPlanToOT      — (shared utility).
-//!   3. Simplify             — outer→inner where null-rejecting predicates allow.
-//!   4. Desimplify           — drive into associative-query state.
-//!   5. MarkAggregationRoot  — tag the output relation as forced DP root
+//!   2. Simplify             — outer→inner where null-rejecting predicates allow.
+//!   3. Desimplify           — drive into associative-query state.
+//!   4. MarkAggregationRoot  — tag the output relation as forced DP root
 //!                             (aggregation queries only).
-//!   6. OTToLogicalPlan      — (shared utility).
 //!
 //! Either OuterYanDP or the existing JOIN_ORDER consumes the result based
 //! on the OuterYan-active flag.
@@ -42,9 +38,9 @@ public:
 	unique_ptr<LogicalOperator> Optimize(unique_ptr<LogicalOperator> plan);
 
 	ApplicabilityResult ApplicabilityCheck(const LogicalOperator &plan);
-	void Simplify(OperatorTree &ot);
-	void Desimplify(OperatorTree &ot);
-	void MarkAggregationRoot(OperatorTree &ot);
+	void Simplify(LogicalOperator &plan);
+	void Desimplify(LogicalOperator &plan);
+	void MarkAggregationRoot(LogicalOperator &plan);
 
 private:
 	ClientContext &context;

@@ -9,7 +9,6 @@
 #pragma once
 
 #include "duckdb/optimizer/outer_yan/evaluation_order.hpp"
-#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
 #include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
 #include "duckdb/optimizer/outer_yan/resimplification.hpp"
 #include "duckdb/optimizer/outer_yan/semijoin_insertion.hpp"
@@ -24,14 +23,12 @@ class ClientContext;
 //! the shared utilities in `tree_conversions.hpp`.
 //!
 //! Step order:
-//!   1. LogicalPlanToOT  — (shared utility).
-//!   2. OTToOJT          — (shared utility).
-//!   3. Resimplify       — outer→original via arrow-side + eval-order.
-//!   4. SemijoinInsert   — bottom-up + top-down passes inserting
-//!                         SJBuild / SJProbe pairs.
-//!   5. OrderFixApply    — verify / enforce evaluation order on OJT.
-//!   6. OJTToOT          — (shared utility).
-//!   7. OTToLogicalPlan  — (shared utility).
+//!   1. LogicalPlanToOJT  — (shared utility).
+//!   2. Resimplify        — outer→original via arrow-side + eval-order.
+//!   3. SemijoinInsert    — bottom-up + top-down passes inserting
+//!                          SJBuild / SJProbe pairs.
+//!   4. OrderFixApply     — verify / enforce evaluation order on OJT.
+//!   5. OJTToLogicalPlan  — (shared utility).
 //!
 //! Skipped entirely when the OuterYan-active flag is false.
 class OuterYanPost {

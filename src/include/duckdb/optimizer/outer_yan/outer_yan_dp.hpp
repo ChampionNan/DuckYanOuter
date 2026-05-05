@@ -11,7 +11,6 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/optimizer/outer_yan/cost_model_outer.hpp"
-#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
 #include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
@@ -63,8 +62,8 @@ private:
 //! applicability flag is set, so OuterYanDP is the sole reorderer for
 //! matched queries.
 //!
-//! `Optimize` orchestrates. Tree conversions (LogicalPlan ↔ OT ↔ OJT)
-//! delegate to the shared utilities in `tree_conversions.hpp`.
+//! `Optimize` orchestrates. Tree conversions (LogicalPlan ↔ OJT) delegate
+//! to the shared utilities in `tree_conversions.hpp`.
 class OuterYanDP {
 public:
 	explicit OuterYanDP(ClientContext &context);

@@ -40,7 +40,7 @@ OuterYanDP::OuterYanDP(ClientContext &context_p) : context(context_p) {
 
 unique_ptr<LogicalOperator> OuterYanDP::Optimize(unique_ptr<LogicalOperator> plan) {
 	// Pipeline:
-	//   plan -> OT -> OJT -> EnumerateRoot (fills memo) -> best entry -> OJT -> OT -> plan
+	//   plan -> OJT -> EnumerateRoot (fills memo) -> best entry -> OJT -> plan
 	throw NotImplementedException("OuterYanDP::Optimize");
 }
 

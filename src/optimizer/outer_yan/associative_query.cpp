@@ -4,11 +4,11 @@
 
 namespace duckdb {
 
-bool AssociativeQuery::Holds(const OperatorTree &ot) {
+bool AssociativeQuery::Holds(const LogicalOperator &plan) {
 	throw NotImplementedException("AssociativeQuery::Holds");
 }
 
-bool AssociativeQuery::PairSatisfiesAssociativity(const OTNode &parent, const OTNode &child) {
+bool AssociativeQuery::PairSatisfiesAssociativity(const LogicalOperator &parent, const LogicalOperator &child) {
 	throw NotImplementedException("AssociativeQuery::PairSatisfiesAssociativity");
 }
 

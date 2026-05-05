@@ -9,8 +9,8 @@ OuterYanPost::OuterYanPost(ClientContext &context_p) : context(context_p) {
 }
 
 unique_ptr<LogicalOperator> OuterYanPost::Optimize(unique_ptr<LogicalOperator> plan) {
-	// Pipeline: LogicalPlanToOT -> OTToOJT -> Resimplify -> SemijoinInsert
-	// -> OrderFixApply -> OJTToOT -> OTToLogicalPlan.
+	// Pipeline: LogicalPlanToOJT -> Resimplify -> SemijoinInsert
+	// -> OrderFixApply -> OJTToLogicalPlan.
 	throw NotImplementedException("OuterYanPost::Optimize");
 }
 

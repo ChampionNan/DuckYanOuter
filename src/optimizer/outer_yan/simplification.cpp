@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-void Simplification::Apply(OperatorTree &ot) {
+void Simplification::Apply(LogicalOperator &plan) {
 	throw NotImplementedException("Simplification::Apply");
 }
 

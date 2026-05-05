@@ -8,7 +8,6 @@ add_library_unity(
   desimplification.cpp
   evaluation_order.cpp
   hash_filter.cpp
-  operator_tree.cpp
   ordered_join_tree.cpp
   outer_yan_dp.cpp
   outer_yan_post.cpp

@@ -1,7 +1,6 @@
 #include "duckdb/optimizer/outer_yan/outer_yan_pre.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/optimizer/outer_yan/tree_conversions.hpp"
 
 namespace duckdb {
 
@@ -9,8 +8,7 @@ OuterYanPre::OuterYanPre(ClientContext &context_p) : context(context_p) {
 }
 
 unique_ptr<LogicalOperator> OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan) {
-	// Pipeline: applicability gate -> LogicalPlanToOT -> Simplify ->
-	// Desimplify -> MarkAggregationRoot -> OTToLogicalPlan.
+	// Pipeline: applicability gate -> Simplify -> Desimplify -> MarkAggregationRoot.
 	throw NotImplementedException("OuterYanPre::Optimize");
 }
 
@@ -18,15 +16,15 @@ ApplicabilityResult OuterYanPre::ApplicabilityCheck(const LogicalOperator &plan)
 	return OuterYanApplicability::Check(plan);
 }
 
-void OuterYanPre::Simplify(OperatorTree &ot) {
-	simplification.Apply(ot);
+void OuterYanPre::Simplify(LogicalOperator &plan) {
+	simplification.Apply(plan);
 }
 
-void OuterYanPre::Desimplify(OperatorTree &ot) {
-	desimplification.Apply(ot);
+void OuterYanPre::Desimplify(LogicalOperator &plan) {
+	desimplification.Apply(plan);
 }
 
-void OuterYanPre::MarkAggregationRoot(OperatorTree &ot) {
+void OuterYanPre::MarkAggregationRoot(LogicalOperator &plan) {
 	throw NotImplementedException("OuterYanPre::MarkAggregationRoot");
 }
 
