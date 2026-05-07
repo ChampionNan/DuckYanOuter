@@ -25,9 +25,11 @@ namespace duckdb {
 //! only for the join-edge / DP layer.
 
 //! LogicalPlan → OrderedJoinTree (focuses on join + base-relation nodes).
-//! The resulting OJT references join nodes inside `plan` via
-//! `OJTEdge::join_op`; `plan` must outlive the returned OJT.
-unique_ptr<OrderedJoinTree> LogicalPlanToOJT(const LogicalOperator &plan);
+//! Takes ownership of `plan`: the returned OJT holds raw pointers into
+//! `plan` (`OJTEdge::join_op`, `OJTNode::base_op`) and stows the plan in
+//! `OrderedJoinTree::source_plan` so those pointers stay valid for the
+//! OJT's lifetime.
+unique_ptr<OrderedJoinTree> LogicalPlanToOJT(unique_ptr<LogicalOperator> plan);
 
 //! OrderedJoinTree → LogicalPlan. Realises the OJT structure back into a
 //! `LogicalOperator` tree, deep-copying base-relation subtrees out of
