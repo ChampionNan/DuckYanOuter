@@ -30,8 +30,13 @@ namespace duckdb {
 unique_ptr<OrderedJoinTree> LogicalPlanToOJT(const LogicalOperator &plan);
 
 //! OrderedJoinTree → LogicalPlan. Realises the OJT structure back into a
-//! `LogicalOperator` tree, reusing the join operators referenced by
-//! `OJTEdge::join_op`.
-unique_ptr<LogicalOperator> OJTToLogicalPlan(unique_ptr<OrderedJoinTree> ojt);
+//! `LogicalOperator` tree, deep-copying base-relation subtrees out of
+//! `OJTNode::base_op` and reusing the join conditions referenced by
+//! `OJTEdge::join_op`. `ojt->source_plan` is intentionally not consulted
+//! — it is kept on the OJT only as a debug / printing aid for the
+//! original plan shape, and may have diverged from the OJT after
+//! transformations.
+unique_ptr<LogicalOperator> OJTToLogicalPlan(ClientContext &context,
+                                             unique_ptr<OrderedJoinTree> ojt);
 
 } // namespace duckdb

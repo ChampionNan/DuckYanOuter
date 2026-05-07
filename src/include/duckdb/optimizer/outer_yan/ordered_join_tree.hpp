@@ -24,11 +24,15 @@
 
 namespace duckdb {
 
-//! Edge classification in the Ordered Join Tree (OJT). Direction marker
-//! mapped 1:1 from the original `JoinType` of the underlying logical join.
-//! This is just a label of the original join's direction; it does not flip
-//! when the OJT orients the edge with reversed parent/child relative to
-//! the original plan's left/right.
+//! Edge classification in the Ordered Join Tree (OJT). Oriented from
+//! OJT-parent to OJT-child: an `OJTEdge` always reads as "parent KIND
+//! child", regardless of which side of the original logical join the
+//! OJT-parent came from. When the OJT places the original RHS as parent,
+//! `LEFT_OUTER` and `RIGHT_OUTER` are flipped so the kind continues to
+//! label the OJT-parent's role (the side that is preserved, etc.).
+//! `INNER` and `FULL_OUTER` are symmetric and unaffected.
+//! See `OrientedJoinTypeToOJTEdgeKind` in tree_conversions.cpp for the
+//! single source of truth that establishes this convention.
 enum class OJTEdgeKind : uint8_t {
 	INNER,
 	LEFT_OUTER,
@@ -101,10 +105,6 @@ struct OJTNode {
 	//! Single-relation predicates pushed down to this node by OuterYan
 	//! passes (independent of any filters already inside `base_op`).
 	vector<unique_ptr<Expression>> filters;
-	//! Whether the underlying base-relation subtree carries any filters
-	//! (a `LogicalFilter` above the `LogicalGet`, or a `LogicalGet` with
-	//! pushed-down `table_filters`). Derived once at OJT construction.
-	bool has_filters = false;
 	//! Ordered children — order is meaningful for evaluation-order regimes.
 	vector<OJTEdge> children;
 	RelationStats stats;
@@ -167,7 +167,9 @@ public:
 
 	//! The original logical plan this OJT was lifted from. Held to keep the
 	//! raw pointers in `OJTEdge::join_op` and `OJTNode::base_op` valid.
-	//! Consumed by `OJTToLogicalPlan` to produce the rebuilt plan.
+	//! Otherwise unused by lowering — kept as a debug / printing aid for
+	//! the original plan shape, which may diverge from the OJT after
+	//! transformations.
 	unique_ptr<LogicalOperator> source_plan;
 
 	//! Multi-relation filter records collected during `LogicalPlanToOJT`
@@ -184,5 +186,14 @@ public:
 private:
 	unique_ptr<OJTNode> root;
 };
+
+//! Flat edge-list printer (default). Lists every relation once and every
+//! edge as `Rparent --KIND/order--> Rchild`. Intended for quick inspection
+//! and golden-file tests.
+string PrintOJT(const OrderedJoinTree &ojt);
+
+//! Indented-tree printer. Same information as `PrintOJT` but rendered as a
+//! parent-child tree, EXPLAIN-style.
+string PrintOJTAsTree(const OrderedJoinTree &ojt);
 
 } // namespace duckdb

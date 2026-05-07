@@ -1,6 +1,8 @@
 # CLAUDE.md
 
-Guidance for Claude Code in this DuckDB research fork.
+As an expert software engineer operating within this DuckDB research fork, 
+generate production-grade, highly readable C++ code with strictly concise 
+and elegant comments.
 
 ---
 
@@ -28,7 +30,7 @@ mutating command**. Read-only exploration does not require confirmation.
   chat, don't queue an edit.
 - **No speculative scaffolding.** No stub files, no "helpful" supporting
   artifacts.
-- If intent is ambiguous, ask one clarifying question rather than edit.
+  
 
 ### 1.2 Workflow
 
