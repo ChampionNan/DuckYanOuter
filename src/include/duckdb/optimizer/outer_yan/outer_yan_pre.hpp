@@ -10,6 +10,7 @@
 
 #include "duckdb/optimizer/outer_yan/applicability.hpp"
 #include "duckdb/optimizer/outer_yan/desimplification.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
 #include "duckdb/optimizer/outer_yan/simplification.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
@@ -18,29 +19,28 @@ class ClientContext;
 
 //! OuterYanPre — first OuterYan pass.
 //!
-//! `Optimize` orchestrates the steps below. Operates directly on the
-//! LogicalOperator tree — there is no separate Operator Tree IR.
+//! `Optimize` lifts the LogicalPlan into `tree.ot` and runs the OT-stage
+//! transforms. The same `OuterYanTree` is handed off to OuterYanDP and
+//! OuterYanPost.
 //!
 //! Step order:
 //!   1. ApplicabilityCheck   — gate; clears the OuterYan flag on failure.
-//!   2. Simplify             — outer→inner where null-rejecting predicates allow.
-//!   3. Desimplify           — drive into associative-query state.
-//!   4. MarkAggregationRoot  — tag the output relation as forced DP root
+//!   2. LogicalPlanToOT      — lift to OperatorTree (filters → tree.filter_records).
+//!   3. Simplify             — outer→inner where null-rejecting predicates allow.
+//!   4. Desimplify           — drive into associative-query state.
+//!   5. MarkAggregationRoot  — tag the output relation as forced DP root
 //!                             (aggregation queries only).
-//!
-//! Either OuterYanDP or the existing JOIN_ORDER consumes the result based
-//! on the OuterYan-active flag.
 class OuterYanPre {
 public:
 	explicit OuterYanPre(ClientContext &context);
 
 	//! Top-level entry point: chains the per-step functions below.
-	unique_ptr<LogicalOperator> Optimize(unique_ptr<LogicalOperator> plan);
+	void Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree);
 
-	ApplicabilityResult ApplicabilityCheck(const LogicalOperator &plan);
-	void Simplify(LogicalOperator &plan);
-	void Desimplify(LogicalOperator &plan);
-	void MarkAggregationRoot(LogicalOperator &plan);
+	ApplicabilityResult ApplicabilityCheck(LogicalOperator &plan);
+	void Simplify(OuterYanTree &tree);
+	void Desimplify(OuterYanTree &tree);
+	void MarkAggregationRoot(OuterYanTree &tree);
 
 private:
 	ClientContext &context;

@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-void Simplification::Apply(LogicalOperator &plan) {
+void Simplification::Apply(OuterYanTree &tree) {
 	throw NotImplementedException("Simplification::Apply");
 }
 

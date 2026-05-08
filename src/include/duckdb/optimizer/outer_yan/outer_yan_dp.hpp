@@ -11,7 +11,7 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/optimizer/outer_yan/cost_model_outer.hpp"
-#include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
@@ -68,7 +68,10 @@ class OuterYanDP {
 public:
 	explicit OuterYanDP(ClientContext &context);
 
-	unique_ptr<LogicalOperator> Optimize(unique_ptr<LogicalOperator> plan);
+	//! Consumes `tree.ot` (built by OuterYanPre), lifts it via `OTToOJT`
+	//! into `tree.ojt`, runs top-down DP enumeration. OuterYanPost picks up
+	//! `tree.ojt`, runs the OJT-stage transforms, and lowers to LogicalPlan.
+	void Optimize(OuterYanTree &tree);
 
 	//! Top-down DP entry. Fills `memo`; for aggregation queries the root is
 	//! forced via the marker installed by OuterYanPre.

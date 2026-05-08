@@ -7,24 +7,24 @@ namespace duckdb {
 OuterYanPre::OuterYanPre(ClientContext &context_p) : context(context_p) {
 }
 
-unique_ptr<LogicalOperator> OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan) {
-	// Pipeline: applicability gate -> Simplify -> Desimplify -> MarkAggregationRoot.
+void OuterYanPre::Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree) {
+	// Pipeline: LogicalPlanToOT → Simplify → Desimplify → MarkAggregationRoot.
 	throw NotImplementedException("OuterYanPre::Optimize");
 }
 
-ApplicabilityResult OuterYanPre::ApplicabilityCheck(const LogicalOperator &plan) {
+ApplicabilityResult OuterYanPre::ApplicabilityCheck(LogicalOperator &plan) {
 	return OuterYanApplicability::Check(plan);
 }
 
-void OuterYanPre::Simplify(LogicalOperator &plan) {
-	simplification.Apply(plan);
+void OuterYanPre::Simplify(OuterYanTree &tree) {
+	simplification.Apply(tree);
 }
 
-void OuterYanPre::Desimplify(LogicalOperator &plan) {
-	desimplification.Apply(plan);
+void OuterYanPre::Desimplify(OuterYanTree &tree) {
+	desimplification.Apply(tree);
 }
 
-void OuterYanPre::MarkAggregationRoot(LogicalOperator &plan) {
+void OuterYanPre::MarkAggregationRoot(OuterYanTree &tree) {
 	throw NotImplementedException("OuterYanPre::MarkAggregationRoot");
 }
 

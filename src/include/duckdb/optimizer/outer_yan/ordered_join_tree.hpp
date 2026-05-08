@@ -16,6 +16,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/logical_operator.hpp"
@@ -24,21 +25,13 @@
 
 namespace duckdb {
 
-//! Edge classification in the Ordered Join Tree (OJT). Oriented from
-//! OJT-parent to OJT-child: an `OJTEdge` always reads as "parent KIND
-//! child", regardless of which side of the original logical join the
-//! OJT-parent came from. When the OJT places the original RHS as parent,
-//! `LEFT_OUTER` and `RIGHT_OUTER` are flipped so the kind continues to
-//! label the OJT-parent's role (the side that is preserved, etc.).
-//! `INNER` and `FULL_OUTER` are symmetric and unaffected.
-//! See `OrientedJoinTypeToOJTEdgeKind` in tree_conversions.cpp for the
-//! single source of truth that establishes this convention.
-enum class OJTEdgeKind : uint8_t {
-	INNER,
-	LEFT_OUTER,
-	RIGHT_OUTER,
-	FULL_OUTER,
-};
+//! `OuterYanJoinKind` (defined in operator_tree.hpp) is the single edge-kind
+//! type shared by OperatorTree and OrderedJoinTree. The OJT-edge orientation
+//! convention "parent KIND child" still applies: when the OJT places the
+//! original RHS as parent, `LEFT_OUTER` and `RIGHT_OUTER` are flipped so the
+//! kind continues to label the OJT-parent's role. `INNER` and `FULL_OUTER`
+//! are symmetric and unaffected. See `CheckOuterYanJoinFlip` in
+//! tree_conversions.cpp for the single source of truth.
 
 struct OJTNode;
 
@@ -54,11 +47,11 @@ struct OJTNode;
 //! lowering to LogicalPlan, driven by these markers.
 struct OJTEdge {
 	//! Current edge classification (may have been transformed by Desimplification).
-	OJTEdgeKind kind = OJTEdgeKind::INNER;
+	OuterYanJoinKind kind = JoinType::INNER;
 	//! Original edge classification, recorded before Desimplification rules were
 	//! applied. Resimplification uses this to revert back to the original join
 	//! type when the chosen ordering makes the rewrite redundant.
-	OJTEdgeKind original_kind = OJTEdgeKind::INNER;
+	OuterYanJoinKind original_kind = JoinType::INNER;
 	//! Build order of the underlying join in the original logical plan.
 	//! 1-based, starting from the bottommost join (`order = 1`) up to the
 	//! root join (`order = n`). Derived from a post-order walk of the
@@ -110,40 +103,10 @@ struct OJTNode {
 	RelationStats stats;
 };
 
-//! Filter record collected during `LogicalPlanToOJT` and consumed during
-//! `OJTToLogicalPlan`. Mimics DuckDB's `FilterInfo` (see
-//! `duckdb/optimizer/join_order/query_graph_manager.hpp`) but indexes
-//! relations by OJT `relation_id` rather than by `JoinRelationSet`, since
-//! OuterYanDP runs DP directly on the OJT.
-class OJTFilterRecord {
-public:
-	OJTFilterRecord(unique_ptr<Expression> filter_p, unordered_set<idx_t> referenced_relations_p,
-	                idx_t filter_index_p, JoinType join_type_p = JoinType::INNER)
-	    : filter(std::move(filter_p)), referenced_relations(std::move(referenced_relations_p)),
-	      filter_index(filter_index_p), join_type(join_type_p) {
-	}
-
-	//! Filter expression, moved out of the original `LogicalFilter` during
-	//! OJT construction. Consumed (moved out again) when applied during lowering.
-	unique_ptr<Expression> filter;
-	//! All OJT relation_ids referenced by `filter`.
-	unordered_set<idx_t> referenced_relations;
-	//! Position in `OrderedJoinTree::filter_records`.
-	idx_t filter_index;
-	//! Join type if this record came from a join condition (else INNER for
-	//! residual single- or multi-relation predicates).
-	JoinType join_type;
-	//! When this record came from a binary equi-join condition: the two
-	//! relations on each side and their bindings. Both unset for residual
-	//! filters.
-	optional<idx_t> left_relation;
-	optional<idx_t> right_relation;
-	ColumnBinding left_binding;
-	ColumnBinding right_binding;
-	//! True if this record came from a residual `LogicalFilter` above the
-	//! join tree (rather than from a join's own conditions).
-	bool from_residual_predicate = false;
-};
+//! `OuterYanFilterRecord` (defined in operator_tree.hpp) is the single
+//! filter-record type shared by OperatorTree and OrderedJoinTree. It is
+//! populated during `LogicalPlanToOT`, carried unchanged through OT-stage
+//! transforms and `OTToOJT`, and finally consumed during `OJTToLogicalPlan`.
 
 //! Ordered Join Tree — internal IR used inside OuterYanDP and OuterYanPost.
 //! Built from a `LogicalOperator` tree by `LogicalPlanToOJT`. The OJT does
@@ -165,35 +128,23 @@ public:
 		return *root;
 	}
 
-	//! The original logical plan this OJT was lifted from. Held to keep the
-	//! raw pointers in `OJTEdge::join_op` and `OJTNode::base_op` valid.
-	//! Otherwise unused by lowering — kept as a debug / printing aid for
-	//! the original plan shape, which may diverge from the OJT after
-	//! transformations.
-	unique_ptr<LogicalOperator> source_plan;
-
-	//! Multi-relation filter records collected during `LogicalPlanToOJT`
-	//! and consumed during `OJTToLogicalPlan`. Single-relation predicates
-	//! that bind to exactly one OJT relation may be pushed onto that
-	//! `OJTNode::filters`; everything else stays here and is applied at
-	//! the lowest covering subtree during lowering.
-	vector<unique_ptr<OJTFilterRecord>> filter_records;
-
 	//! Visit every node in post-order. Callback receives node, its parent (or
 	//! null for root), and the edge kind from parent to node.
-	void PostOrder(std::function<void(OJTNode &, optional_ptr<OJTNode>, OJTEdgeKind)> callback);
+	void PostOrder(std::function<void(OJTNode &, optional_ptr<OJTNode>, OuterYanJoinKind)> callback);
+
+	//! Flat edge-list printer. Lists every relation once and every edge as
+	//! `Rparent --KIND/order--> Rchild`. Intended for quick inspection /
+	//! golden-file tests. Filter records are not printed here — they live
+	//! on `OuterYanTree`, not on the OJT, so callers print them
+	//! separately if needed.
+	string Print() const;
+
+	//! Indented-tree printer. Same information as `Print` but rendered
+	//! parent-child tree style, EXPLAIN-style.
+	string PrintAsTree() const;
 
 private:
 	unique_ptr<OJTNode> root;
 };
-
-//! Flat edge-list printer (default). Lists every relation once and every
-//! edge as `Rparent --KIND/order--> Rchild`. Intended for quick inspection
-//! and golden-file tests.
-string PrintOJT(const OrderedJoinTree &ojt);
-
-//! Indented-tree printer. Same information as `PrintOJT` but rendered as a
-//! parent-child tree, EXPLAIN-style.
-string PrintOJTAsTree(const OrderedJoinTree &ojt);
 
 } // namespace duckdb

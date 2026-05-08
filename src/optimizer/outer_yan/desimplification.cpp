@@ -4,31 +4,31 @@
 
 namespace duckdb {
 
-void Desimplification::Apply(LogicalOperator &plan) {
+void Desimplification::Apply(OuterYanTree &tree) {
 	throw NotImplementedException("Desimplification::Apply");
 }
 
-bool Desimplification::ApplyRule1(LogicalOperator &node) {
+bool Desimplification::ApplyRule1(OTNode &node) {
 	throw NotImplementedException("Desimplification::ApplyRule1");
 }
 
-bool Desimplification::ApplyRule2(LogicalOperator &node) {
+bool Desimplification::ApplyRule2(OTNode &node) {
 	throw NotImplementedException("Desimplification::ApplyRule2");
 }
 
-bool Desimplification::ApplyRule3(LogicalOperator &node) {
+bool Desimplification::ApplyRule3(OTNode &node) {
 	throw NotImplementedException("Desimplification::ApplyRule3");
 }
 
-bool Desimplification::ApplyRule4(LogicalOperator &node) {
+bool Desimplification::ApplyRule4(OTNode &node) {
 	throw NotImplementedException("Desimplification::ApplyRule4");
 }
 
-bool Desimplification::ApplyRule5(LogicalOperator &node) {
+bool Desimplification::ApplyRule5(OTNode &node) {
 	throw NotImplementedException("Desimplification::ApplyRule5");
 }
 
-bool Desimplification::ApplyRule6(LogicalOperator &node) {
+bool Desimplification::ApplyRule6(OTNode &node) {
 	throw NotImplementedException("Desimplification::ApplyRule6");
 }
 

@@ -30,6 +30,10 @@ mutating command**. Read-only exploration does not require confirmation.
   chat, don't queue an edit.
 - **No speculative scaffolding.** No stub files, no "helpful" supporting
   artifacts.
+- Leverage modern C++ paradigms by encapsulating database operators and 
+  optimization states within well-structured classes or modules, utilizing 
+  RAII for deterministic resource management, and preferring STL algorithms 
+  over raw loops while preserving zero-overhead system performance.
   
 
 ### 1.2 Workflow
@@ -120,6 +124,7 @@ Active work:
   - `PRAGMA explain_output='all';`
   - `PRAGMA disabled_optimizers='...';` to isolate the new sub-phase.
 - Sanitizers: `BUILD_UNITTEST=1 ENABLE_SANITIZER=1 GEN=ninja make debug`.
+- Currently, not build the project. 
 
 ### 2.5 Response Conventions
 

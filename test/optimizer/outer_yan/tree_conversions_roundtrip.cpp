@@ -4,8 +4,7 @@
 #include "duckdb.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/optimizer/outer_yan/ordered_join_tree.hpp"
-#include "duckdb/optimizer/outer_yan/tree_conversions.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
 #include "duckdb/parser/statement/logical_plan_statement.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
@@ -24,8 +23,9 @@ void Seed(Connection &con) {
 
 //! Run `sql` through:
 //!   reference path: con.Query(sql) — full pipeline.
-//!   roundtrip path: con.ExtractPlan(sql) → LogicalPlanToOJT → OJTToLogicalPlan
-//!                   → wrap as LogicalPlanStatement → con.Query(stmt).
+//!   roundtrip path: con.ExtractPlan(sql) → LogicalPlanToOT → OTToOJT →
+//!                   OJTToLogicalPlan → wrap as LogicalPlanStatement →
+//!                   con.Query(stmt).
 //! Assert both paths return identical materialised results. Caller must
 //! supply an `ORDER BY` so the comparison is deterministic.
 void AssertRoundtripMatches(Connection &con, const string &sql) {
@@ -35,10 +35,14 @@ void AssertRoundtripMatches(Connection &con, const string &sql) {
 	auto plan = con.ExtractPlan(sql);
 	REQUIRE(plan);
 
-	auto ojt = LogicalPlanToOJT(std::move(plan));
-	REQUIRE(ojt);
+	OuterYanTree tree;
+	LogicalPlanToOT(std::move(plan), tree);
+	REQUIRE(tree.HasOT());
 
-	auto rebuilt = OJTToLogicalPlan(*con.context, std::move(ojt));
+	OTToOJT(tree);
+	REQUIRE(tree.HasOJT());
+
+	auto rebuilt = OJTToLogicalPlan(*con.context, tree);
 	REQUIRE(rebuilt);
 
 	auto stmt = make_uniq<LogicalPlanStatement>(std::move(rebuilt));
@@ -102,7 +106,7 @@ TEST_CASE("outer_yan tree_conversions: 3-relation chain LEFT roundtrip "
 	// A LEFT JOIN B LEFT JOIN C — when the OJT's degree-driven parent pick
 	// places B as the OJT-parent of the (A,B) edge, `edge.kind` must flip
 	// from LEFT_OUTER to RIGHT_OUTER so the rebuilt join still preserves A.
-	// See `OrientedJoinTypeToOJTEdgeKind` in
+	// See `CheckOuterYanJoinFlip` in
 	// src/optimizer/outer_yan/tree_conversions.cpp.
 	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx "
 	                            "FROM a "
@@ -143,12 +147,12 @@ TEST_CASE("outer_yan tree_conversions: multi-relation residual filter roundtrip"
 // Documented-unsupported cases — hidden by `[.]`, run with explicit tag.
 // ============================================================================
 
-// `LogicalPlanToOJT` throws NotImplementedException when a residual filter's
+// `LogicalPlanToOT` throws NotImplementedException when a residual filter's
 // `BoundColumnRef`s all resolve to a `table_index` introduced by a
-// `LogicalProjection` above the join tree (no registered OJT base relation).
-// See tree_conversions.cpp:336-338. Future work: register projection
-// table_indices, or push the filter through the projection. Marked hidden so
-// the limitation is visible as a TODO without failing the default suite.
+// `LogicalProjection` above the join tree (no registered OT base relation).
+// Future work: register projection table_indices, or push the filter through
+// the projection. Marked hidden so the limitation is visible as a TODO
+// without failing the default suite.
 TEST_CASE("outer_yan tree_conversions: residual filter via projection (UNSUPPORTED)",
           "[outer_yan][tree_conversions][.]") {
 	DuckDB db(nullptr);
@@ -156,7 +160,7 @@ TEST_CASE("outer_yan tree_conversions: residual filter via projection (UNSUPPORT
 	Seed(con);
 	// Subquery-induced projection rebinds columns to a fresh table_index;
 	// a WHERE on the rebinding column produces a residual filter whose
-	// referenced relations are empty from the OJT's point of view.
+	// referenced relations are empty from the OT's point of view.
 	const string sql = "SELECT t.id, t.b_total "
 	                   "FROM (SELECT a.id AS id, b.bx AS b_total "
 	                   "      FROM a INNER JOIN b ON a.id = b.id) AS t "
@@ -164,5 +168,6 @@ TEST_CASE("outer_yan tree_conversions: residual filter via projection (UNSUPPORT
 	                   "ORDER BY t.id";
 	auto plan = con.ExtractPlan(sql);
 	REQUIRE(plan);
-	REQUIRE_THROWS_AS(LogicalPlanToOJT(std::move(plan)), NotImplementedException);
+	OuterYanTree tree;
+	REQUIRE_THROWS_AS(LogicalPlanToOT(std::move(plan), tree), NotImplementedException);
 }

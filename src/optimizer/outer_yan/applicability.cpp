@@ -146,6 +146,18 @@ void OuterYanApplicability::VisitComparisonJoin(LogicalComparisonJoin &join) {
 			Reject("NULL-tolerant join condition (IS [NOT] DISTINCT FROM) not supported");
 			return;
 		}
+		// Equi-join enforcement: comparator must be `=` and both sides must
+		// be plain BoundColumnRefs. Theta / inequality / expression-on-side
+		// joins are deferred to a future relaxation.
+		if (cmp != ExpressionType::COMPARE_EQUAL) {
+			Reject("non-equi join condition (only `=` supported)");
+			return;
+		}
+		if (cond.GetLHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    cond.GetRHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+			Reject("equi-join condition sides must be plain column references");
+			return;
+		}
 
 		unordered_set<idx_t> tables;
 		CollectColumnTables(cond.GetLHS(), tables);

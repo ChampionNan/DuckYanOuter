@@ -1,7 +1,7 @@
 #include "duckdb/optimizer/outer_yan/outer_yan_dp.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/optimizer/outer_yan/tree_conversions.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
 
 namespace duckdb {
 
@@ -38,9 +38,9 @@ unique_ptr<OJTNode> DPMemo::ExtractBest() {
 OuterYanDP::OuterYanDP(ClientContext &context_p) : context(context_p) {
 }
 
-unique_ptr<LogicalOperator> OuterYanDP::Optimize(unique_ptr<LogicalOperator> plan) {
+void OuterYanDP::Optimize(OuterYanTree &tree) {
 	// Pipeline:
-	//   plan -> OJT -> EnumerateRoot (fills memo) -> best entry -> OJT -> plan
+	//   tree.ot -> OTToOJT -> EnumerateRoot (fills memo) -> rebuilt tree.ojt
 	throw NotImplementedException("OuterYanDP::Optimize");
 }
 
