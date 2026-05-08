@@ -45,7 +45,7 @@ struct OTNode {
 
 	// -- JOIN-only --
 	OuterYanJoinKind join_kind = JoinType::INNER;
-	//! Recorded before Desimplification; Resimplification (on OJT) consults
+	//! Recorded before Simplification; Resimplification (on OJT) consults
 	//! this to revert outer→outer when the chosen ordering allows it.
 	OuterYanJoinKind original_join_kind = JoinType::INNER;
 	//! Build order of this join in the original plan, identical convention

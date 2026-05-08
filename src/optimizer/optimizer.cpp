@@ -239,12 +239,6 @@ void Optimizer::RunBuiltInOptimizers() {
 		projection_pullup.Optimize(plan);
 	});
 
-	// Simplifies FULL OUTER -> LEFT/RIGHT OUTER -> INNER if NULLs are filtered anyway
-	RunOptimizer(OptimizerType::OUTER_JOIN_SIMPLIFICATION, [&]() {
-		OuterJoinSimplification outer_join_simplification;
-		outer_join_simplification.VisitOperator(*plan);
-	});
-
 	// OuterYan — three-pass optimizer for acyclic CQs with inner / outer joins.
 	// `OuterYanPre` runs the applicability gate first and stores the result
 	// (true / false) in `outer_yan_active`. The remaining OuterYan passes
@@ -281,6 +275,12 @@ void Optimizer::RunBuiltInOptimizers() {
 			plan = aggregate_pushdown_outer.Optimize(std::move(plan));
 		});
 	} else {
+		// Simplifies FULL OUTER -> LEFT/RIGHT OUTER -> INNER if NULLs are filtered anyway
+		RunOptimizer(OptimizerType::OUTER_JOIN_SIMPLIFICATION, [&]() {
+			OuterJoinSimplification outer_join_simplification;
+			outer_join_simplification.VisitOperator(*plan);
+		});
+
 		RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 			JoinOrderOptimizer optimizer(context);
 			plan = optimizer.Optimize(std::move(plan));
