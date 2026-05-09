@@ -8,14 +8,55 @@
 
 namespace duckdb {
 
+// NOTE: Implementation strategy
+// -----------------------------
+// 1. Seed `null_rej` once, from every null-rejecting record in
+//    `tree.filter_records`. The filter's physical position in the input plan
+//    is intentionally ignored — a filter that constrains a relation's column
+//    is taken to constrain that relation in the final result, so any join
+//    above the filter that would null-pad those columns must be rewritten.
+//    `DominatesJoin`-style structural checks belong to filter-pushdown
+//    placement, not to this pass.
+// 2. Walk the OT top-down. At each JOIN node:
+//      (a) Look at which child subtree (left / right / both) contains a
+//          relation in `null_rej`. Collapse the join kind accordingly:
+//            LEFT  + rhs_nullrej              -> INNER
+//            RIGHT + lhs_nullrej              -> INNER
+//            OUTER + both                     -> INNER
+//            OUTER + lhs_nullrej only         -> LEFT
+//            OUTER + rhs_nullrej only         -> RIGHT
+//      (b) The join condition itself null-rejects on the relation referenced
+//          on each preserved side; insert those relation_ids into `null_rej`
+//          before recursing so deeper joins observe the same constraint:
+//            INNER -> insert both child relation_ids
+//            LEFT  -> insert right child relation_id
+//            RIGHT -> insert left  child relation_id
+//            OUTER -> nothing
+// 3. `null_rej` is passed by value into recursive calls so additions made
+//    while walking one subtree do not contaminate the sibling subtree.
+
 void Simplification::Apply(OuterYanTree &tree) {
 	if (!tree.HasOT()) {
 		return;
 	}
-	null_filtered_columns.clear();
 	subtree_relations.clear();
 	ComputeSubtreeRelations(tree.OT().Root());
-	VisitNode(tree, tree.OT().Root());
+
+	// Seed: every null-rejecting filter contributes its relations.
+	unordered_set<idx_t> null_rej;
+	for (auto &rec : tree.filter_records) {
+		if (!rec || !rec->filter) {
+			continue;
+		}
+		if (!FilterRejectsNulls(*rec->filter)) {
+			continue;
+		}
+		for (auto rel : rec->referenced_relations) {
+			null_rej.insert(rel);
+		}
+	}
+
+	VisitNode(tree, tree.OT().Root(), std::move(null_rej));
 }
 
 const unordered_set<idx_t> &Simplification::ComputeSubtreeRelations(OTNode &node) {
@@ -31,129 +72,109 @@ const unordered_set<idx_t> &Simplification::ComputeSubtreeRelations(OTNode &node
 	return out;
 }
 
-void Simplification::HandleExpression(const Expression &expr) {
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
-		return;
-	}
-	auto &colref = expr.Cast<BoundColumnRefExpression>();
-	null_filtered_columns.insert(colref.binding);
-}
-
-void Simplification::HandleFilterRecord(const Expression &expr) {
+bool Simplification::FilterRejectsNulls(const Expression &expr) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_OPERATOR &&
 	    expr.GetExpressionType() == ExpressionType::OPERATOR_IS_NOT_NULL) {
-		const auto &is_not_null = expr.Cast<BoundOperatorExpression>();
-		HandleExpression(*is_not_null.children[0]);
-	} else if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
-		if (expr.GetExpressionType() == ExpressionType::COMPARE_DISTINCT_FROM ||
-		    expr.GetExpressionType() == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
-			return;
-		}
-		const auto &cmp = expr.Cast<BoundComparisonExpression>();
-		HandleExpression(*cmp.left);
-		HandleExpression(*cmp.right);
+		return true;
 	}
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
+		const auto cmp_type = expr.GetExpressionType();
+		if (cmp_type == ExpressionType::COMPARE_DISTINCT_FROM ||
+		    cmp_type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+			return false;
+		}
+		return true;
+	}
+	return false;
 }
 
-bool Simplification::DominatesJoin(const OuterYanFilterRecord &record, OTNode &join_node) {
-	const auto &left = subtree_relations[join_node.children[0].get()];
-	const auto &right = subtree_relations[join_node.children[1].get()];
-	bool inside_left = true;
-	bool inside_right = true;
-	for (auto rel : record.referenced_relations) {
-		if (left.find(rel) == left.end()) {
-			inside_left = false;
-		}
-		if (right.find(rel) == right.end()) {
-			inside_right = false;
-		}
-		if (!inside_left && !inside_right) {
+bool Simplification::SubtreeIntersectsNullRejection(OTNode &node,
+                                                    const unordered_set<idx_t> &null_rej) {
+	if (null_rej.empty()) {
+		return false;
+	}
+	const auto &rels = subtree_relations[&node];
+	for (auto rel : rels) {
+		if (null_rej.find(rel) != null_rej.end()) {
 			return true;
 		}
 	}
 	return false;
 }
 
-void Simplification::HarvestDominatingFilters(OuterYanTree &tree, OTNode &join_node) {
-	for (auto &rec : tree.filter_records) {
-		if (!rec || !rec->filter) {
-			continue;
-		}
-		if (!DominatesJoin(*rec, join_node)) {
-			continue;
-		}
-		HandleFilterRecord(*rec->filter);
-	}
-}
-
-void Simplification::VisitNode(OuterYanTree &tree, OTNode &node) {
+void Simplification::VisitNode(OuterYanTree &tree, OTNode &node,
+                               unordered_set<idx_t> null_rej) {
 	if (node.kind == OTNode::Kind::RELATION) {
 		return;
 	}
 	D_ASSERT(node.kind == OTNode::Kind::JOIN);
 	auto &join = node.origin->Cast<LogicalComparisonJoin>();
 
-	HarvestDominatingFilters(tree, node);
+	// (a) Collapse the join kind based on which child subtree contains a
+	//     null-rejected relation.
+	const bool lhs_nullrej =
+	    SubtreeIntersectsNullRejection(*node.children[0], null_rej);
+	const bool rhs_nullrej =
+	    SubtreeIntersectsNullRejection(*node.children[1], null_rej);
 
 	switch (join.join_type) {
-	case JoinType::INNER: {
-		// INNER conditions reject NULLs on both sides.
-		for (const auto &condition : join.conditions) {
-			if (!condition.IsComparison()) {
-				continue;
-			}
-			if (condition.GetComparisonType() == ExpressionType::COMPARE_DISTINCT_FROM ||
-			    condition.GetComparisonType() == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
-				continue;
-			}
-			HandleExpression(condition.GetLHS());
-			HandleExpression(condition.GetRHS());
-		}
-		VisitNode(tree, *node.children[0]);
-		VisitNode(tree, *node.children[1]);
-		return;
-	}
+	case JoinType::INNER:
+		break;
 	case JoinType::LEFT:
-	case JoinType::RIGHT:
-	case JoinType::OUTER: {
-		bool preserves_null_extended_rows[2] = {
-		    join.join_type == JoinType::LEFT || join.join_type == JoinType::OUTER,
-		    join.join_type == JoinType::RIGHT || join.join_type == JoinType::OUTER};
-		for (idx_t child_idx = 0; child_idx < 2; child_idx++) {
-			for (const auto &binding : node.children[child_idx]->origin->GetColumnBindings()) {
-				if (null_filtered_columns.find(binding) != null_filtered_columns.end()) {
-					// Rejecting NULLs in one child removes preservation of NULL extended rows for the other child
-					preserves_null_extended_rows[1 - child_idx] = false;
-					break;
-				}
-			}
-		}
-
-		if (!preserves_null_extended_rows[0] && !preserves_null_extended_rows[1]) {
+		if (rhs_nullrej) {
 			join.join_type = JoinType::INNER;
 			node.join_kind = JoinType::INNER;
-			VisitNode(tree, node); // Re-enter — the new INNER's conditions are NULL-filtering
-			return;
 		}
-		if (preserves_null_extended_rows[0] && !preserves_null_extended_rows[1]) {
-			D_ASSERT(join.join_type == JoinType::LEFT || join.join_type == JoinType::OUTER);
+		break;
+	case JoinType::RIGHT:
+		if (lhs_nullrej) {
+			join.join_type = JoinType::INNER;
+			node.join_kind = JoinType::INNER;
+		}
+		break;
+	case JoinType::OUTER:
+		if (lhs_nullrej && rhs_nullrej) {
+			join.join_type = JoinType::INNER;
+			node.join_kind = JoinType::INNER;
+		} else if (lhs_nullrej) {
+			// LHS cannot be null-introducing → drop right-preservation.
 			join.join_type = JoinType::LEFT;
 			node.join_kind = JoinType::LEFT;
-		} else if (!preserves_null_extended_rows[0] && preserves_null_extended_rows[1]) {
-			D_ASSERT(join.join_type == JoinType::RIGHT || join.join_type == JoinType::OUTER);
+		} else if (rhs_nullrej) {
+			// RHS cannot be null-introducing → drop left-preservation.
 			join.join_type = JoinType::RIGHT;
 			node.join_kind = JoinType::RIGHT;
-		} else {
-			D_ASSERT(join.join_type == JoinType::OUTER);
 		}
-		VisitNode(tree, *node.children[0]);
-		VisitNode(tree, *node.children[1]);
-		return;
-	}
+		break;
 	default:
 		throw InternalException("OuterYan Simplification: unexpected join type %s",
 		                        EnumUtil::ToString(join.join_type));
 	}
+
+	// (b) Extend null_rej with the relations the (possibly rewritten) join
+	//     condition itself null-rejects on the preserved side(s).
+	switch (join.join_type) {
+	case JoinType::INNER:
+		null_rej.insert(node.left_child_relation_id);
+		null_rej.insert(node.right_child_relation_id);
+		break;
+	case JoinType::LEFT:
+		// R1 ⟕ R2 on R1.x = R2.y: matched R2 rows must have R2.y non-null.
+		null_rej.insert(node.right_child_relation_id);
+		break;
+	case JoinType::RIGHT:
+		// R1 ⟖ R2 on R1.x = R2.y: matched R1 rows must have R1.x non-null.
+		null_rej.insert(node.left_child_relation_id);
+		break;
+	case JoinType::OUTER:
+		break;
+	default:
+		throw InternalException("OuterYan Simplification: unexpected join type %s",
+		                        EnumUtil::ToString(join.join_type));
+	}
+
+	VisitNode(tree, *node.children[0], null_rej);
+	VisitNode(tree, *node.children[1], null_rej);
 }
 
 } // namespace duckdb
