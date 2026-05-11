@@ -60,6 +60,13 @@ inline OuterYanJoinKind CheckOuterYanJoinFlip(OuterYanJoinKind kind,
 	return parent_is_left ? kind : FlipOuterYanJoinKind(kind);
 }
 
+bool Fail(string *reason, const string &msg) {
+	if (reason) {
+		*reason = msg;
+	}
+	return false;
+}
+
 //! Filter record shared by OperatorTree and OrderedJoinTree. Populated in
 //! `LogicalPlanToOT`, carried through OT-stage transforms unchanged, then
 //! handed to OJT via `OTToOJT`, and finally consumed during

@@ -1,7 +1,9 @@
 #include "duckdb/optimizer/outer_yan/operator_tree.hpp"
+#include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+
 
 namespace duckdb {
 
@@ -27,13 +29,6 @@ bool IsBaseRelationSubtree(const LogicalOperator &op) {
 	default:
 		return false;
 	}
-}
-
-bool Fail(string *reason, const string &msg) {
-	if (reason) {
-		*reason = msg;
-	}
-	return false;
 }
 
 bool CheckShape(const OTNode &node, string *reason) {
@@ -83,34 +78,6 @@ bool CheckRelationIdsUnique(const OperatorTree &ot, string *reason) {
 	return true;
 }
 
-//! KEY rule: each (parent_join, child_join) pair must share at least one
-//! relation_id between {parent.left, parent.right} and {child.left,
-//! child.right}. Empty intersection ⇒ implicit cross product.
-bool CheckCommonRelationRule(const OTNode &node, const OTNode *parent_join, string *reason) {
-	if (node.kind == OTNode::Kind::JOIN && parent_join != nullptr) {
-		idx_t pl = parent_join->left_child_relation_id;
-		idx_t pr = parent_join->right_child_relation_id;
-		idx_t cl = node.left_child_relation_id;
-		idx_t cr = node.right_child_relation_id;
-		bool common = (pl == cl) || (pl == cr) || (pr == cl) || (pr == cr);
-		if (!common) {
-			return Fail(reason,
-			            StringUtil::Format("OT join pair shares no relation: parent {R%llu,R%llu} "
-			                               "child {R%llu,R%llu} ⇒ implicit cross product",
-			                               pl, pr, cl, cr));
-		}
-	}
-	const OTNode *next_parent =
-	    (node.kind == OTNode::Kind::JOIN) ? &node : parent_join;
-	if (node.children[0] && !CheckCommonRelationRule(*node.children[0], next_parent, reason)) {
-		return false;
-	}
-	if (node.children[1] && !CheckCommonRelationRule(*node.children[1], next_parent, reason)) {
-		return false;
-	}
-	return true;
-}
-
 } // namespace
 
 bool OperatorTree::IsValid(string *reason) const {
@@ -121,9 +88,6 @@ bool OperatorTree::IsValid(string *reason) const {
 		return false;
 	}
 	if (!CheckRelationIdsUnique(*this, reason)) {
-		return false;
-	}
-	if (!CheckCommonRelationRule(*root, nullptr, reason)) {
 		return false;
 	}
 	return true;

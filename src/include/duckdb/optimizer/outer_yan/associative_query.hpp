@@ -23,9 +23,6 @@ namespace duckdb {
 class AssociativeQuery {
 public:
 	static bool Holds(const LogicalOperator &plan);
-
-	//! Local check on a single (parent, child) join-operator pair.
-	static bool PairSatisfiesAssociativity(const LogicalOperator &parent, const LogicalOperator &child);
 };
 
 } // namespace duckdb
