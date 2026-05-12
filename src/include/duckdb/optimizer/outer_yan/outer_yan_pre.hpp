@@ -15,7 +15,6 @@
 #include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
-class ClientContext;
 
 //! OuterYanPre — first OuterYan pass.
 //!
@@ -24,15 +23,20 @@ class ClientContext;
 //! OuterYanPost.
 //!
 //! Step order:
-//!   1. ApplicabilityCheck   — gate; clears the OuterYan flag on failure.
-//!   2. LogicalPlanToOT      — lift to OperatorTree (filters → tree.filter_records).
+//!   1. ApplicabilityCheck   — gate; clears the OuterYan flag on failure
+//!                             (invoked by the caller before `Optimize`).
+//!   2. LogicalPlanToOT      — lift to OperatorTree; also classifies the root
+//!                             LogicalAggregate (if any) into
+//!                             `tree.root_aggregation`, replacing the former
+//!                             standalone MarkAggregationRoot step.
 //!   3. Simplify             — outer→inner where null-rejecting predicates allow.
 //!   4. Desimplify           — drive into associative-query state.
-//!   5. MarkAggregationRoot  — tag the output relation as forced DP root
-//!                             (aggregation queries only).
+//!   5. AllPairsSatisfy      — post-condition assertion: every (P, D) pair
+//!                             now sits in an OK cell of the associativity
+//!                             table.
 class OuterYanPre {
 public:
-	explicit OuterYanPre(ClientContext &context);
+	OuterYanPre() = default;
 
 	//! Top-level entry point: chains the per-step functions below.
 	void Optimize(unique_ptr<LogicalOperator> plan, OuterYanTree &tree);
@@ -40,10 +44,8 @@ public:
 	ApplicabilityResult ApplicabilityCheck(LogicalOperator &plan);
 	void Simplify(OuterYanTree &tree);
 	void Desimplify(OuterYanTree &tree);
-	void MarkAggregationRoot(OuterYanTree &tree);
 
 private:
-	ClientContext &context;
 	Simplification simplification;
 	Desimplification desimplification;
 };

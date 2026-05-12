@@ -10,8 +10,10 @@
 #include "duckdb/optimizer/join_order/join_relation.hpp"
 #include "duckdb/optimizer/join_order/relation_index.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -180,6 +182,10 @@ public:
 		auto root = BuildNode(plan_root, /*depth*/ 0);
 		AssignJoinOrders();
 		SetJoinTwoSides();
+		// `tree.table_to_relation` is fully populated only after every RELATION
+		// node has been built; resolve aggregate column bindings into relation
+		// ids now.
+		ResolveAggregationRelations();
 
 		auto ot = make_uniq<OperatorTree>();
 		ot->root = std::move(root);
@@ -212,6 +218,10 @@ private:
 			return BuildJoinNode(op, depth);
 		case LogicalOperatorType::LOGICAL_FILTER:
 			return BuildThroughFilter(op, depth);
+		case LogicalOperatorType::LOGICAL_PROJECTION:
+			return BuildThroughProjection(op, depth);
+		case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
+			return BuildThroughAggregate(op, depth);
 		default:
 			throw NotImplementedException("LogicalPlanToOT: unsupported operator %s",
 			                              EnumUtil::ToString(op.type));
@@ -271,6 +281,118 @@ private:
 		}
 		filter.expressions.clear();
 		return child_node;
+	}
+
+	//! Peel a root LogicalProjection. The projection's output schema is not
+	//! preserved across OuterYan (the rebuilt plan handles column lifetime via
+	//! downstream passes), so no metadata is captured here.
+	unique_ptr<OTNode> BuildThroughProjection(LogicalOperator &op, idx_t depth) {
+		if (op.children.size() != 1) {
+			throw InternalException("LogicalProjection with %llu children",
+			                        op.children.size());
+		}
+		return BuildNode(*op.children[0], depth);
+	}
+
+	//! Peel a root LogicalAggregate, classify it into `tree.root_aggregation`,
+	//! and descend into the join skeleton beneath. The applicability gate
+	//! already rejects aggregates that appear inside the join skeleton, so
+	//! this case fires only on the root chain.
+	unique_ptr<OTNode> BuildThroughAggregate(LogicalOperator &op, idx_t depth) {
+		if (op.children.size() != 1) {
+			throw InternalException("LogicalAggregate with %llu children",
+			                        op.children.size());
+		}
+		auto &agg = op.Cast<LogicalAggregate>();
+		ClassifyRootAggregate(agg);
+		return BuildNode(*op.children[0], depth);
+	}
+
+	//! Record the root aggregate's type tag and per-expression column info on
+	//! `tree.root_aggregation`. Classification is by aggregate function name
+	//! only -- mirrors `DuckDBYanPlus::DetectQueryType` (optimizer.cpp:533) and
+	//! `aggregation_pushdown.cpp:102`.
+	void ClassifyRootAggregate(LogicalAggregate &agg) {
+		auto &info = tree.root_aggregation;
+		// Outermost aggregate wins; binding layers never emit nested
+		// LogicalAggregate so this is defensive only.
+		if (info.type != OuterYanAggregationType::NONE) {
+			return;
+		}
+		info.agg_op = &agg;
+		info.has_group_by = !agg.groups.empty();
+
+		bool any_count_star = false;
+		bool any_minmax = false;
+		bool any_sum = false;
+		bool any_other = false;
+
+		for (auto &expr : agg.expressions) {
+			if (expr->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+				any_other = true;
+				continue;
+			}
+			auto &bag = expr->Cast<BoundAggregateExpression>();
+			OuterYanAggregateColumn col;
+			col.function_name = bag.function.name;
+			if (!bag.children.empty() && bag.children[0] &&
+			    bag.children[0]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				col.binding = bag.children[0]->Cast<BoundColumnRefExpression>().binding;
+			}
+			info.columns.push_back(std::move(col));
+
+			const auto &name = bag.function.name;
+			if (name == "count_star") {
+				if (agg.groups.empty()) {
+					any_count_star = true;
+				} else {
+					// count_star + GROUP BY decomposes to a SUM-shape during
+					// aggregation pushdown (see reference reclassification).
+					any_sum = true;
+				}
+			} else if (name == "count") {
+				if (!agg.groups.empty()) {
+					any_sum = true;
+				} else {
+					any_other = true;
+				}
+			} else if (name == "min" || name == "max") {
+				any_minmax = true;
+			} else if (name == "sum") {
+				any_sum = true;
+			} else {
+				any_other = true;
+			}
+		}
+
+		if (any_other) {
+			info.type = OuterYanAggregationType::OTHER;
+		} else if (any_minmax && !any_sum && !any_count_star) {
+			info.type = OuterYanAggregationType::MINMAX;
+		} else if (any_sum && !any_minmax && !any_count_star) {
+			info.type = OuterYanAggregationType::SUM;
+		} else if (any_count_star && !any_minmax && !any_sum) {
+			info.type = OuterYanAggregationType::COUNT_STAR;
+		} else {
+			info.type = OuterYanAggregationType::OTHER;
+		}
+	}
+
+	//! Map each recorded aggregate column's `binding.table_index` back to its
+	//! OT relation id. Runs once after every RELATION node has been built so
+	//! `tree.table_to_relation` is complete. Unresolved entries (e.g.,
+	//! count_star with no column, or a column whose table_index sits outside
+	//! the skeleton) are left with an empty `relation`.
+	void ResolveAggregationRelations() {
+		for (auto &col : tree.root_aggregation.columns) {
+			if (col.binding.table_index.index == DConstants::INVALID_INDEX) {
+				continue;
+			}
+			auto it = tree.table_to_relation.find(col.binding.table_index.index);
+			if (it != tree.table_to_relation.end()) {
+				col.relation = it->second;
+			}
+		}
 	}
 
 	void AssignJoinOrders() {

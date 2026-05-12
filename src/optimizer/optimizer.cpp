@@ -254,7 +254,7 @@ void Optimizer::RunBuiltInOptimizers() {
 	RunOptimizer(OptimizerType::OUTER_YAN_PRE, [&]() {
 		outer_yan_active = outer_yan_tree.CheckApplicability(*plan);
 		if (outer_yan_active) {
-			OuterYanPre outer_yan_pre(context);
+			OuterYanPre outer_yan_pre;
 			outer_yan_pre.Optimize(std::move(plan), outer_yan_tree);
 		}
 	});

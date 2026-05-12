@@ -106,6 +106,10 @@ public:
 	//! Centralised filter store. Owned here through OT and OJT phases;
 	//! consumed by `OJTToLogicalPlan`.
 	vector<unique_ptr<OuterYanFilterRecord>> filter_records;
+	//! Root-aggregation classification, populated by `BuildOT` while peeling
+	//! the projection/aggregate chain above the join skeleton. Consumed by
+	//! OuterYanDP's forced-root logic for aggregation queries.
+	OuterYanRootAggregation root_aggregation;
 
 private:
 	//! Original LogicalPlan, owned for the wrapper's lifetime so that raw

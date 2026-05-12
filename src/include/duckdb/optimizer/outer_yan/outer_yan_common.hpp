@@ -11,13 +11,20 @@
 #include "duckdb/common/enums/join_type.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional.hpp"
+#include "duckdb/common/string.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector.hpp"
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/planner/expression.hpp"
 
 namespace duckdb {
+class LogicalAggregate;
+
+//! OT/OJT base-relation identifier; centralised here so both the
+//! applicability gate and OperatorTree/OrderedJoinTree share the same alias.
+using RelationId = idx_t;
 
 //! Edge / join classification, shared by OperatorTree and OrderedJoinTree.
 //! Aliased to DuckDB's `JoinType` since the two are semantically identical
@@ -93,6 +100,40 @@ public:
 	ColumnBinding left_binding;
 	ColumnBinding right_binding;
 	bool from_residual_predicate = false;
+};
+
+//! Classification of a root LogicalAggregate sitting above the OuterYan join
+//! skeleton. Mirrors the categories used by `DuckDBYanPlus::DetectQueryType`:
+//! purely a function-name dispatch over the aggregate's bound function
+//! (`count`, `count_star`, `min`, `max`, `sum`); no `IsDistributive` /
+//! `IsHolistic` helper is involved.
+enum class OuterYanAggregationType : uint8_t {
+	NONE,        //!< query has no root aggregation
+	COUNT_STAR,  //!< `count_star()` with empty GROUP BY
+	MINMAX,      //!< only `min` / `max` aggregates
+	SUM,         //!< `sum`, or `count` / `count_star` with non-empty GROUP BY
+	OTHER        //!< unsupported / mixed aggregate shape
+};
+
+//! Per-aggregate column descriptor recorded during OT build. For
+//! `count_star`, `binding` carries `INVALID_INDEX` table/column indices and
+//! `relation` stays empty.
+struct OuterYanAggregateColumn {
+	string function_name;
+	ColumnBinding binding;
+	optional<RelationId> relation;
+};
+
+//! Root-aggregation marker held on `OuterYanTree`. Populated during
+//! `OuterYanTree::BuildOT` while peeling the projection/aggregate root chain
+//! above the join skeleton.
+struct OuterYanRootAggregation {
+	OuterYanAggregationType type = OuterYanAggregationType::NONE;
+	//! Raw pointer into `OuterYanTree::source_plan`; same lifetime contract
+	//! as `OTNode::origin`.
+	LogicalAggregate *agg_op = nullptr;
+	bool has_group_by = false;
+	vector<OuterYanAggregateColumn> columns;
 };
 
 } // namespace duckdb
