@@ -8,63 +8,52 @@
 
 #pragma once
 
-#include "duckdb/common/unordered_map.hpp"
-#include "duckdb/common/vector.hpp"
+#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
 #include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
 
 namespace duckdb {
 
 //! Iteratively applies the six Galindo-Legaria/Rosenthal outer-join
-//! associativity rules to drive the OJT into the *associative-query state*:
-//! every adjacent order pair (k, k+1) is either already associative, made so
-//! by a rewrite of the lower-order kind, or skippable per case (b).
+//! associativity rules over the `OperatorTree` until every (P, D) JOIN pair
+//! is in the *associative-query state* (an OK cell after operator-inverse
+//! normalisation).
 //!
-//! The 4x4 lookup is split into two direction-keyed tables (`kRightAssoc`,
-//! `kLeftAssoc`), both indexed by (Diamond_{1,2}, Diamond_{2,3}) -- i.e.,
-//! kinds read in chain order R_1--R_2--R_3, not eval order. For a pair
-//! sharing middle relation R_mid with non-shared ends R_a (of e_low) and
-//! R_b (of e_up):
-//!   ord(edge(R_a, R_mid)) < ord(edge(R_mid, R_b))  =>  right-assoc form (LHS)
-//!   ord(edge(R_a, R_mid)) > ord(edge(R_mid, R_b))  =>  left-assoc  form (RHS)
+//! For each ordered JOIN pair (P, D) with D a JOIN descendant of P:
+//!   - D in P.children[0]  -> right-assoc table (D = D_low, P = D_up).
+//!   - D in P.children[1]  -> left-assoc  table (D = D_low, P = D_up).
+//! The shared "middle" relation flows through P's condition: it is
+//! P.left_child_relation_id when D sits on the left, P.right_child_relation_id
+//! when D sits on the right. If that relation is absent from D's subtree the
+//! pair is skipped (P and D are not adjacent through P's condition). When the
+//! middle relation falls on the "wrong" side of D for the canonical rule
+//! shape, `FlipOuterYanJoinKind` is applied to D's kind *at lookup time only*
+//! (no OT mutation), and any mutation that results is flipped back before
+//! committing to `D.join_kind`.
 //!
-//! Right-assoc table (Diamond_{1,2} = Diamond_low, Diamond_{2,3} = Diamond_up):
-//!   D12 \ D23   INNER     LEFT   RIGHT      FULL
-//!   INNER       o         o      R1         R2
-//!   LEFT        INVAL     o      INVAL      R3
-//!   RIGHT       o         o      o          o
-//!   FULL        INVAL     o      INVAL      o
+//! Right-assoc table (D_low = D_{1,2}, D_up = D_{2,3}; cell value = new D_low.kind):
+//!   D12 \ D23   INNER     LEFT   RIGHT          FULL
+//!   INNER       OK        OK     R1:=RIGHT      R2:=RIGHT
+//!   LEFT        INVAL     OK     INVAL          R3:=FULL
+//!   RIGHT       OK        OK     OK             OK
+//!   FULL        INVAL     OK     INVAL          OK
 //!
-//! Left-assoc table (Diamond_{1,2} = Diamond_up, Diamond_{2,3} = Diamond_low):
-//!   D12 \ D23   INNER     LEFT   RIGHT      FULL
-//!   INNER       o         o      INVAL      INVAL
-//!   LEFT        R4        o      INVAL      INVAL
-//!   RIGHT       o         o      o          o
-//!   FULL        R5        o      R6         o
+//! Left-assoc table (D_up = D_{1,2}, D_low = D_{2,3}; cell value = new D_low.kind):
+//!   D12 \ D23   INNER         LEFT   RIGHT          FULL
+//!   INNER       OK            OK     INVAL          INVAL
+//!   LEFT        R4:=LEFT      OK     INVAL          INVAL
+//!   RIGHT       OK            OK     OK             OK
+//!   FULL        R5:=LEFT      OK     R6:=FULL       OK
 //!
-//! Each rule rewrites Diamond_low (the lower-order edge's kind):
-//!   R1 (Inner, Right)  Diamond_low Inner -> Right    [right-assoc]
-//!   R2 (Inner, Full)   Diamond_low Inner -> Right    [right-assoc]
-//!   R3 (Left,  Full)   Diamond_low Left  -> Full     [right-assoc]
-//!   R4 (Left,  Inner)  Diamond_low Inner -> Left     [left-assoc]
-//!   R5 (Full,  Inner)  Diamond_low Inner -> Left     [left-assoc]
-//!   R6 (Full,  Right)  Diamond_low Right -> Full     [left-assoc]
-//!
-//! INVALID cells indicate a non-simple query; `Apply` throws.
-//!
-//! Path classification at a pair (e_k, e_{k+1}):
-//!   (a) shared OJT node                  -- direct table lookup.
-//!   (b) path edges all have order > k+1  -- pair is remote in eval order;
-//!                                           already associative; skip.
-//!   (c) path edges all have order < k    -- collapsed via a virtual middle
-//!                                           node; reduces to case (a).
-//!   (d) mixed path orders                -- recursive reduction (TBD).
+//! Each post-rewrite (D_low.kind, D_up.kind) combination lands in an OK cell.
+//! INVALID cells flag a non-simple query; `Apply` and `AllPairsSatisfy` both
+//! throw in that case -- simplification was incomplete.
 class Desimplification {
 public:
-	//! Drive `tree.OJT()` to fixpoint. No-op if OJT is absent.
+	//! Drive `tree.OT()` to fixpoint. No-op if OT is absent.
 	void Apply(OuterYanTree &tree);
 
-	//! Predicate: every adjacent order pair is associative (or skippable per
-	//! case (b)). Does not mutate the tree.
+	//! Predicate: every (P, D) pair already sits in an OK cell. Throws on
+	//! INVALID. Does not mutate the tree.
 	bool AllPairsSatisfy(OuterYanTree &tree);
 
 	enum class CellTag : uint8_t {
@@ -73,44 +62,36 @@ public:
 		R4, R5, R6, //!< left-assoc rules
 		INVALID     //!< not a simple query
 	};
-	enum class PathKind : uint8_t { kSameNode, kHigherOnly, kLowerOnly, kMixed };
 
 private:
-	struct EdgeRef {
-		OJTNode *parent = nullptr; //!< OJT node owning the edge (parent endpoint)
-		OJTEdge *edge = nullptr;
-	};
-
-	void BuildIndex(OJTNode &root);
-	void BuildIndexDFS(OJTNode &node, OJTNode *parent_node);
-
-	OJTNode *SharedNode(const EdgeRef &lower, const EdgeRef &upper);
-
-	PathKind ClassifyPath(const EdgeRef &lower, const EdgeRef &upper, idx_t k);
-
-	//! Right-assoc lookup table -- indexed by [Diamond_{1,2}][Diamond_{2,3}] where
-	//! Diamond_{1,2} = Diamond_low, Diamond_{2,3} = Diamond_up.
+	//! Row/column order across both tables: INNER, LEFT, RIGHT, FULL(OUTER).
 	static const CellTag kRightAssoc[4][4];
-	//! Left-assoc lookup table -- indexed by [Diamond_{1,2}][Diamond_{2,3}] where
-	//! Diamond_{1,2} = Diamond_up, Diamond_{2,3} = Diamond_low.
 	static const CellTag kLeftAssoc[4][4];
 
-	//! Right-assoc lookup: Diamond_{1,2} = Diamond_low, Diamond_{2,3} = Diamond_up.
-	static CellTag LookupRightAssoc(OuterYanJoinKind k_lower, OuterYanJoinKind k_upper);
-	//! Left-assoc lookup: Diamond_{1,2} = Diamond_up, Diamond_{2,3} = Diamond_low.
-	static CellTag LookupLeftAssoc(OuterYanJoinKind k_lower, OuterYanJoinKind k_upper);
+	//! Right-assoc lookup: indexed by (D_low.kind, D_up.kind).
+	static CellTag LookupRightAssoc(OuterYanJoinKind d_low, OuterYanJoinKind d_up);
+	//! Left-assoc  lookup: indexed by (D_up.kind, D_low.kind).
+	static CellTag LookupLeftAssoc(OuterYanJoinKind d_up, OuterYanJoinKind d_low);
 
-	//! Mutate `e_lower.kind` per `tag`. For INVALID, throws in non-`dry_run`
-	//! mode and reports a violation otherwise. Returns true iff the pair
-	//! triggered any action (kind change or violation).
-	static bool ApplyCell(CellTag tag, OJTEdge &e_lower, bool dry_run);
+	//! For a non-OK, non-INVALID rule: the canonical-frame new D_low kind.
+	//!   R1, R2 -> RIGHT;  R3 -> FULL;  R4, R5 -> LEFT;  R6 -> FULL.
+	static OuterYanJoinKind NewLowerKind(CellTag tag);
 
-	bool ProcessPair(idx_t k, bool dry_run);
-	bool RunPass(bool dry_run);
+	//! Recursion #2 (outer): visit every OTNode as the parent P top-down. At
+	//! each P, drive recursion #1 across both subtrees, then descend into the
+	//! children as new Ps. Returns true if any (P, D) pair fired.
+	bool VisitAsParent(OTNode &P, bool dry_run);
 
-	vector<EdgeRef> edge_by_order;               //!< 1-based; index 0 unused
-	unordered_map<OJTNode *, EdgeRef> parent_of; //!< child node -> parent edge
-	idx_t n_joins = 0;
+	//! Recursion #1 (inner): with P fixed, walk every JOIN descendant D in
+	//! `subtree_root` and call `TryMatch`.
+	bool MatchDescendants(OTNode &P, OTNode &subtree_root, bool right_assoc, bool dry_run);
+
+	//! (P, D) pair handling: middle-relation locate via P's condition,
+	//! at-lookup operator inversion via `FlipOuterYanJoinKind`, table lookup,
+	//! optional mutation of `D.join_kind`. Returns true iff a non-OK cell
+	//! fired (rewrite committed when `!dry_run`, signalled when `dry_run`).
+	//! Throws on INVALID in either mode.
+	bool TryMatch(OTNode &P, OTNode &D, bool right_assoc, bool dry_run);
 };
 
 } // namespace duckdb

@@ -10,6 +10,7 @@
 
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
 #include "duckdb/planner/logical_operator.hpp"
@@ -65,6 +66,13 @@ struct OTNode {
 	//! Binary tree. JOIN: both filled. RELATION: both null.
 	//! children[0] corresponds to origin->children[0] in the original join.
 	unique_ptr<OTNode> children[2];
+
+	//! Relation IDs contained in this subtree. For RELATION, equals
+	//! `{relation_id}`. For JOIN, equals the union of `children[0]` and
+	//! `children[1]` subsets. Populated by `OperatorTree::Finalize` and
+	//! asserted by `IsValid`. Stable under kind-only mutations performed by
+	//! Simplification / Desimplification / Resimplification.
+	unordered_set<idx_t> subtree_relations;
 };
 
 //! OperatorTree — first IR of the OuterYan pipeline. Pure structure: only
@@ -83,22 +91,39 @@ public:
 		return *root;
 	}
 
+	//! Build-side step run by `LogicalPlanToOT` after `relation_id` /
+	//! `left_child_relation_id` / `right_child_relation_id` are set. Two
+	//! responsibilities:
+	//!   1. Populate every `OTNode::subtree_relations` (post-order union).
+	//!   2. Canonicalise every JOIN so that the join condition's LHS
+	//!      relation lives in `children[0]->subtree_relations` and the RHS
+	//!      relation lives in `children[1]->subtree_relations`. When the
+	//!      original `LogicalComparisonJoin::conditions[0]` is reversed,
+	//!      swaps `cond.left` ↔ `cond.right` on the underlying join (a
+	//!      semantic no-op for INNER/LEFT/RIGHT/FULL equi/theta conditions)
+	//!      and swaps `left_child_relation_id` ↔ `right_child_relation_id`
+	//!      on the OTNode. Children are never reordered; `join_kind` is
+	//!      never changed.
+	void Finalize();
+
 	//! Structural validity check, intended for between-pass assertions.
 	//! Verifies:
 	//!   1. Tree shape: every node is JOIN (binary, both children present)
 	//!      or RELATION (no children); origin non-null and of the matching
 	//!      type.
 	//!   2. Relation-id uniqueness across all RELATION OTNodes.
-	//!   3. Common-relation rule (KEY): for every (parent_join, child_join)
+	//!   3. `subtree_relations` matches the recomputed union at every node.
+	//!   4. For every JOIN node, the conditions[0] LHS relation equals
+	//!      `left_child_relation_id` and resides in `children[0]`'s subset;
+	//!      same for RHS / `right_child_relation_id` / `children[1]`.
+	//!   5. Common-relation rule (KEY): for every (parent_join, child_join)
 	//!      OTNode pair where child_join is directly under parent_join,
 	//!      {parent.left_child_relation_id, parent.right_child_relation_id}
-	//!      and {child.left_child_relation_id, child.right_child_relation_id}
-	//!      share at least one relation_id. Empty intersection ⇒ implicit
-	//!      cross product ⇒ invalid OT.
+	//!      and child_join's `subtree_relations` share at least one
+	//!      relation_id. Empty intersection ⇒ implicit cross product ⇒
+	//!      invalid OT.
 	//! On failure, writes a diagnostic into *reason (if non-null) and
-	//! returns false; caller decides whether to throw. Coverage of
-	//! applicability.table_index_to_relation is checked at the
-	//! `OuterYanTree` level (since that map lives there now).
+	//! returns false; caller decides whether to throw.
 	bool IsValid(string *reason = nullptr) const;
 };
 

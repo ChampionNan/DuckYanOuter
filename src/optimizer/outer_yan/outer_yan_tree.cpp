@@ -183,6 +183,11 @@ public:
 
 		auto ot = make_uniq<OperatorTree>();
 		ot->root = std::move(root);
+		// Populate `OTNode::subtree_relations` and canonicalise every JOIN so
+		// that `conditions[0]` LHS / RHS line up with `children[0]` / `children[1]`.
+		// Downstream passes (Simplification, Desimplification, OTToOJT, etc.)
+		// assume this canonical form.
+		ot->Finalize();
 		return ot;
 	}
 

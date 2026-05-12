@@ -1,7 +1,7 @@
 #include "duckdb/optimizer/outer_yan/desimplification.hpp"
 
+#include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/unordered_set.hpp"
 
 namespace duckdb {
 
@@ -22,7 +22,7 @@ constexpr idx_t kJoinKindIndex(OuterYanJoinKind k) {
 	case JoinType::OUTER:
 		return 3;
 	default:
-		throw InternalException("Desimplification: OJT edge carries unsupported JoinType");
+		throw InternalException("Desimplification: OTNode carries unsupported JoinType");
 	}
 }
 
@@ -30,260 +30,166 @@ constexpr idx_t kJoinKindIndex(OuterYanJoinKind k) {
 
 using CellTag = Desimplification::CellTag;
 
-//! Row/column order: INNER, LEFT, RIGHT, FULL(OUTER).
+//! Right-assoc, indexed by [D_low.kind][D_up.kind].
 const CellTag Desimplification::kRightAssoc[4][4] = {
-    /* D12=INNER */ {CellTag::OK, CellTag::OK, CellTag::R1, CellTag::R2},
-    /* D12=LEFT  */ {CellTag::INVALID, CellTag::OK, CellTag::INVALID, CellTag::R3},
-    /* D12=RIGHT */ {CellTag::OK, CellTag::OK, CellTag::OK, CellTag::OK},
-    /* D12=FULL  */ {CellTag::INVALID, CellTag::OK, CellTag::INVALID, CellTag::OK},
+    /* D_low=INNER */ {CellTag::OK, CellTag::OK, CellTag::R1, CellTag::R2},
+    /* D_low=LEFT  */ {CellTag::INVALID, CellTag::OK, CellTag::INVALID, CellTag::R3},
+    /* D_low=RIGHT */ {CellTag::OK, CellTag::OK, CellTag::OK, CellTag::OK},
+    /* D_low=FULL  */ {CellTag::INVALID, CellTag::OK, CellTag::INVALID, CellTag::OK},
 };
 
+//! Left-assoc, indexed by [D_up.kind][D_low.kind].
 const CellTag Desimplification::kLeftAssoc[4][4] = {
-    /* D12=INNER */ {CellTag::OK, CellTag::OK, CellTag::INVALID, CellTag::INVALID},
-    /* D12=LEFT  */ {CellTag::R4, CellTag::OK, CellTag::INVALID, CellTag::INVALID},
-    /* D12=RIGHT */ {CellTag::OK, CellTag::OK, CellTag::OK, CellTag::OK},
-    /* D12=FULL  */ {CellTag::R5, CellTag::OK, CellTag::R6, CellTag::OK},
+    /* D_up=INNER */ {CellTag::OK, CellTag::OK, CellTag::INVALID, CellTag::INVALID},
+    /* D_up=LEFT  */ {CellTag::R4, CellTag::OK, CellTag::INVALID, CellTag::INVALID},
+    /* D_up=RIGHT */ {CellTag::OK, CellTag::OK, CellTag::OK, CellTag::OK},
+    /* D_up=FULL  */ {CellTag::R5, CellTag::OK, CellTag::R6, CellTag::OK},
 };
 
-CellTag Desimplification::LookupRightAssoc(OuterYanJoinKind k_lower, OuterYanJoinKind k_upper) {
-	return kRightAssoc[kJoinKindIndex(k_lower)][kJoinKindIndex(k_upper)];
+CellTag Desimplification::LookupRightAssoc(OuterYanJoinKind d_low, OuterYanJoinKind d_up) {
+	return kRightAssoc[kJoinKindIndex(d_low)][kJoinKindIndex(d_up)];
 }
 
-CellTag Desimplification::LookupLeftAssoc(OuterYanJoinKind k_lower, OuterYanJoinKind k_upper) {
-	// Indexed by (Diamond_{1,2} = Diamond_up, Diamond_{2,3} = Diamond_low).
-	return kLeftAssoc[kJoinKindIndex(k_upper)][kJoinKindIndex(k_lower)];
+CellTag Desimplification::LookupLeftAssoc(OuterYanJoinKind d_up, OuterYanJoinKind d_low) {
+	return kLeftAssoc[kJoinKindIndex(d_up)][kJoinKindIndex(d_low)];
 }
 
-// ============================================================================
-// Cell application
-// ============================================================================
-
-bool Desimplification::ApplyCell(CellTag tag, OJTEdge &e_lower, bool dry_run) {
-	OuterYanJoinKind new_kind = e_lower.kind;
+OuterYanJoinKind Desimplification::NewLowerKind(CellTag tag) {
 	switch (tag) {
-	case CellTag::OK:
-		return false;
 	case CellTag::R1:
 	case CellTag::R2:
-		new_kind = JoinType::RIGHT; // Diamond_low Inner -> Right
-		break;
+		return JoinType::RIGHT;
 	case CellTag::R3:
-		new_kind = JoinType::OUTER; // Diamond_low Left  -> Full
-		break;
+		return JoinType::OUTER;
 	case CellTag::R4:
 	case CellTag::R5:
-		new_kind = JoinType::LEFT; // Diamond_low Inner -> Left
-		break;
+		return JoinType::LEFT;
 	case CellTag::R6:
-		new_kind = JoinType::OUTER; // Diamond_low Right -> Full
-		break;
-	case CellTag::INVALID:
-		if (dry_run) {
-			return true; // signal: predicate fails for this pair
-		}
-		throw InternalException("Desimplification: pair is not a simple query "
-		                        "(no associativity rule applies)");
+		return JoinType::OUTER;
+	default:
+		throw InternalException("Desimplification::NewLowerKind: tag has no rewrite kind");
 	}
-	if (new_kind == e_lower.kind) {
+}
+
+// ============================================================================
+// Pair matching
+// ============================================================================
+
+bool Desimplification::TryMatch(OTNode &P, OTNode &D, bool right_assoc, bool dry_run) {
+	// The shared middle relation between P and D flows through P's condition:
+	//   right_assoc -> the LHS relation of P (which lives in P.children[0]).
+	//   left_assoc  -> the RHS relation of P (which lives in P.children[1]).
+	const idx_t mid_rel = right_assoc ? P.left_child_relation_id : P.right_child_relation_id;
+	if (!D.subtree_relations.count(mid_rel)) {
+		return false; // P and D are not adjacent through P's condition.
+	}
+
+	// Locate `mid_rel` within D's two subtrees. By OT canonicalisation
+	// (`OperatorTree::Finalize`) every relation lives in exactly one of
+	// children[0] / children[1], so exactly one side will contain it.
+	const bool in_D_left = D.children[0]->subtree_relations.count(mid_rel) > 0;
+	const bool in_D_right = D.children[1]->subtree_relations.count(mid_rel) > 0;
+	if (in_D_left == in_D_right) {
+		// Either both (would violate relation_id uniqueness) or neither
+		// (contradicts the `D.subtree_relations.count` guard above).
+		throw InternalException(
+		    "Desimplification: middle relation %llu not uniquely placed in D's subtrees",
+		    mid_rel);
+	}
+
+	// Canonical shape places the middle relation on the side of D away from
+	// the recursion direction:
+	//   right-assoc -> middle relation should be in D's RIGHT subtree;
+	//   left-assoc  -> middle relation should be in D's LEFT subtree.
+	// When the OT shape inverts that, view D as flipped for the table lookup;
+	// any rewrite kind produced by the table is flipped back before commit.
+	const bool invert_D = right_assoc ? in_D_left : in_D_right;
+	const OuterYanJoinKind eff_D_kind =
+	    invert_D ? FlipOuterYanJoinKind(D.join_kind) : D.join_kind;
+
+	const CellTag tag = right_assoc ? LookupRightAssoc(eff_D_kind, P.join_kind)
+	                                : LookupLeftAssoc(P.join_kind, eff_D_kind);
+	if (tag == CellTag::INVALID) {
+		throw InternalException(
+		    "Desimplification: non-simple query at (P=%s, D=%s) under %s-assoc -- "
+		    "simplification was incomplete",
+		    EnumUtil::ToString(P.join_kind), EnumUtil::ToString(D.join_kind),
+		    right_assoc ? "right" : "left");
+	}
+	if (tag == CellTag::OK) {
 		return false;
 	}
-	if (!dry_run) {
-		e_lower.kind = new_kind;
+	if (dry_run) {
+		return true; // would mutate -- pair not yet satisfied.
 	}
+
+	const OuterYanJoinKind new_kind = NewLowerKind(tag);
+	const OuterYanJoinKind committed = invert_D ? FlipOuterYanJoinKind(new_kind) : new_kind;
+	if (committed == D.join_kind) {
+		return false;
+	}
+	D.join_kind = committed;
 	return true;
 }
 
 // ============================================================================
-// Index construction
+// Recursion drivers
 // ============================================================================
 
-void Desimplification::BuildIndex(OJTNode &root) {
-	edge_by_order.clear();
-	parent_of.clear();
-	n_joins = 0;
-	BuildIndexDFS(root, nullptr);
-}
-
-void Desimplification::BuildIndexDFS(OJTNode &node, OJTNode *parent_node) {
-	(void)parent_node; // parent linkage is recorded via `parent_of` below.
-	for (auto &edge : node.children) {
-		const idx_t ord = edge.order;
-		if (ord == 0) {
-			throw InternalException("Desimplification: encountered OJT edge with order 0");
-		}
-		if (ord >= edge_by_order.size()) {
-			edge_by_order.resize(ord + 1);
-		}
-		edge_by_order[ord] = {&node, &edge};
-		if (n_joins < ord) {
-			n_joins = ord;
-		}
-		if (edge.child) {
-			parent_of[edge.child.get()] = {&node, &edge};
-			BuildIndexDFS(*edge.child, &node);
-		}
-	}
-}
-
-// ============================================================================
-// Topology queries
-// ============================================================================
-
-OJTNode *Desimplification::SharedNode(const EdgeRef &lower, const EdgeRef &upper) {
-	OJTNode *lp = lower.parent;
-	OJTNode *lc = lower.edge->child.get();
-	OJTNode *up = upper.parent;
-	OJTNode *uc = upper.edge->child.get();
-	if (lp == up || lp == uc) {
-		return lp;
-	}
-	if (lc == up || lc == uc) {
-		return lc;
-	}
-	return nullptr;
-}
-
-Desimplification::PathKind Desimplification::ClassifyPath(const EdgeRef &lower, const EdgeRef &upper, idx_t k) {
-	if (SharedNode(lower, upper) != nullptr) {
-		return PathKind::kSameNode;
-	}
-
-	OJTNode *lc = lower.edge->child.get();
-	OJTNode *uc = upper.edge->child.get();
-
-	// Build the set of OJT ancestors of `lc` (inclusive).
-	unordered_set<OJTNode *> lc_ancestors;
-	for (OJTNode *cur = lc; cur != nullptr;) {
-		lc_ancestors.insert(cur);
-		auto it = parent_of.find(cur);
-		cur = (it != parent_of.end()) ? it->second.parent : nullptr;
-	}
-
-	// LCA(lc, uc): first node along uc -> root that is also in lc_ancestors.
-	OJTNode *lca = nullptr;
-	for (OJTNode *cur = uc; cur != nullptr;) {
-		if (lc_ancestors.count(cur)) {
-			lca = cur;
-			break;
-		}
-		auto it = parent_of.find(cur);
-		cur = (it != parent_of.end()) ? it->second.parent : nullptr;
-	}
-	if (!lca) {
-		throw InternalException("Desimplification: no LCA between adjacent edges");
-	}
-
-	// Walk lc -> lca and uc -> lca, skipping the first edge from each direction
-	// (which is e_low / e_up respectively).
-	bool any_lower_order = false;
-	bool any_higher_order = false;
-	const idx_t k_plus_1 = k + 1;
-
-	auto walk = [&](OJTNode *start) {
-		OJTNode *node = start;
-		bool first = true;
-		while (node != lca) {
-			auto it = parent_of.find(node);
-			if (it == parent_of.end()) {
-				throw InternalException("Desimplification: walked above OJT root during LCA traversal");
-			}
-			if (!first) {
-				const idx_t ord = it->second.edge->order;
-				if (ord < k) {
-					any_lower_order = true;
-				} else if (ord > k_plus_1) {
-					any_higher_order = true;
-				}
-				// ord == k or k+1 cannot occur: e_low / e_up are excluded.
-			}
-			first = false;
-			node = it->second.parent;
-		}
-	};
-	walk(lc);
-	walk(uc);
-
-	if (any_lower_order && any_higher_order) {
-		return PathKind::kMixed;
-	}
-	if (any_lower_order) {
-		return PathKind::kLowerOnly;
-	}
-	if (any_higher_order) {
-		return PathKind::kHigherOnly;
-	}
-	throw InternalException("Desimplification: distinct non-adjacent edges yielded an empty connecting path");
-}
-
-// ============================================================================
-// Pair processing and fixpoint driver
-// ============================================================================
-
-bool Desimplification::ProcessPair(idx_t k, bool dry_run) {
-	if (k + 1 > n_joins) {
+bool Desimplification::MatchDescendants(OTNode &P, OTNode &node, bool right_assoc, bool dry_run) {
+	if (node.kind != OTNode::Kind::JOIN) {
 		return false;
 	}
-	EdgeRef &lower = edge_by_order[k];
-	EdgeRef &upper = edge_by_order[k + 1];
-	if (!lower.edge || !upper.edge) {
-		throw InternalException("Desimplification: missing entry in edge_by_order");
+	bool changed = TryMatch(P, node, right_assoc, dry_run);
+	if (dry_run && changed) {
+		return true;
 	}
-
-	const PathKind path_kind = ClassifyPath(lower, upper, k);
-	switch (path_kind) {
-	case PathKind::kSameNode:
-	case PathKind::kLowerOnly: {
-		// Case (a) direct, or case (c) collapsed via lower-order subtree.
-		// Direction selection under the right-assoc traversal convention
-		// (R_a = non-shared end of e_low) maps every pair to right-assoc
-		// form; the left-assoc table is retained as the dual lookup for the
-		// flipped convention -- flip via `LookupLeftAssoc` here when needed.
-		const CellTag tag = LookupRightAssoc(lower.edge->kind, upper.edge->kind);
-		return ApplyCell(tag, *lower.edge, dry_run);
+	changed |= MatchDescendants(P, *node.children[0], right_assoc, dry_run);
+	if (dry_run && changed) {
+		return true;
 	}
-	case PathKind::kHigherOnly:
-		// Case (b): pair is remote in eval order -- already associative.
-		return false;
-	case PathKind::kMixed:
-		// Case (d): recursive reduction over higher-/lower-order subpaths is
-		// not yet implemented. Refine via `Swap` / `AdjacentSwap` once the
-		// reordering machinery is in place.
-		throw NotImplementedException("Desimplification: mixed-order path "
-		                              "between adjacent edges -- recursive "
-		                              "case (d) reduction not yet implemented");
-	}
-	return false;
-}
-
-bool Desimplification::RunPass(bool dry_run) {
-	bool changed = false;
-	for (idx_t k = 1; k + 1 <= n_joins; k++) {
-		if (ProcessPair(k, dry_run)) {
-			changed = true;
-			if (dry_run) {
-				return true;
-			}
-		}
-	}
+	changed |= MatchDescendants(P, *node.children[1], right_assoc, dry_run);
 	return changed;
 }
 
+bool Desimplification::VisitAsParent(OTNode &P, bool dry_run) {
+	if (P.kind != OTNode::Kind::JOIN) {
+		return false;
+	}
+	bool changed = MatchDescendants(P, *P.children[0], /*right_assoc=*/true, dry_run);
+	if (dry_run && changed) {
+		return true;
+	}
+	changed |= MatchDescendants(P, *P.children[1], /*right_assoc=*/false, dry_run);
+	if (dry_run && changed) {
+		return true;
+	}
+	changed |= VisitAsParent(*P.children[0], dry_run);
+	if (dry_run && changed) {
+		return true;
+	}
+	changed |= VisitAsParent(*P.children[1], dry_run);
+	return changed;
+}
+
+// ============================================================================
+// Public entry points
+// ============================================================================
+
 void Desimplification::Apply(OuterYanTree &tree) {
-	if (!tree.HasOJT()) {
+	if (!tree.HasOT()) {
 		return;
 	}
-	BuildIndex(tree.OJT().Root());
-	while (RunPass(/*dry_run=*/false)) {
+	while (VisitAsParent(tree.OT().Root(), /*dry_run=*/false)) {
 		// fixpoint
 	}
 }
 
 bool Desimplification::AllPairsSatisfy(OuterYanTree &tree) {
-	if (!tree.HasOJT()) {
+	if (!tree.HasOT()) {
 		return true;
 	}
-	BuildIndex(tree.OJT().Root());
-	return !RunPass(/*dry_run=*/true);
+	return !VisitAsParent(tree.OT().Root(), /*dry_run=*/true);
 }
 
 } // namespace duckdb
