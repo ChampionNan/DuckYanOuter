@@ -136,4 +136,25 @@ struct OuterYanRootAggregation {
 	vector<OuterYanAggregateColumn> columns;
 };
 
+//! One equi-join key inside a semi-join pair. `build_binding` is the column
+//! that feeds the hash table; `probe_binding` is the column that is
+//! filtered. The bindings reference the original LogicalGet `table_index`
+//! values inside `OuterYanTree::source_plan` and stay valid for the
+//! wrapper's lifetime (until `OJTToLogicalPlan` rebuilds the plan).
+struct OuterYanSemiKey {
+	ColumnBinding build_binding;
+	ColumnBinding probe_binding;
+};
+
+//! A semi-join reduction decision recorded by `OuterYanPre` from the
+//! post-simplification, pre-desimplification OJT and later materialised by
+//! `SemijoinInsertion` into a `LogicalSJBuild` on `build` plus a matching
+//! `LogicalSJProbe` on `probe`. Multi-condition equi-joins yield multiple
+//! entries in `keys`.
+struct OuterYanSemiPair {
+	RelationId build = 0;
+	RelationId probe = 0;
+	vector<OuterYanSemiKey> keys;
+};
+
 } // namespace duckdb

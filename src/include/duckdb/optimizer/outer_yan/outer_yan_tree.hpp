@@ -66,6 +66,12 @@ public:
 	//! top-down OJT assembly without re-walking the OT.
 	void BuildOJT();
 
+	//! Same construction as `BuildOJT`, but returns the freshly-built OJT
+	//! without persisting it. Used by transient consumers (e.g.,
+	//! `OuterYanPre` recording semi-join pairs against a post-simplification
+	//! OJT snapshot whose lifetime ends with the local `unique_ptr`).
+	unique_ptr<OrderedJoinTree> ConstructOJT();
+
 	//! Stage 4: realise `ojt` (and `filter_records`) back to a
 	//! LogicalPlan. Pre-condition: `ojt` populated. Releases
 	//! `source_plan` and `ojt` since the rebuilt plan is structurally
@@ -110,6 +116,16 @@ public:
 	//! the projection/aggregate chain above the join skeleton. Consumed by
 	//! OuterYanDP's forced-root logic for aggregation queries.
 	OuterYanRootAggregation root_aggregation;
+	//! Phase 1 (bottom-up) semi-join pairs. Recorded by `OuterYanPre` from
+	//! a post-simplification, pre-desimplification OJT snapshot; consumed
+	//! by `SemijoinInsertion`. Each entry corresponds to an OJT edge with
+	//! `kind ∈ {RIGHT, INNER}`; semantically `parent := parent ⋉ child`,
+	//! so `build = child` and `probe = parent`.
+	vector<OuterYanSemiPair> bottom_up_pairs;
+	//! Phase 2 (top-down) semi-join pairs. Each entry corresponds to an
+	//! OJT edge with `kind ∈ {LEFT, INNER}`; semantically
+	//! `child := child ⋉ parent`, so `build = parent` and `probe = child`.
+	vector<OuterYanSemiPair> top_down_pairs;
 
 private:
 	//! Original LogicalPlan, owned for the wrapper's lifetime so that raw

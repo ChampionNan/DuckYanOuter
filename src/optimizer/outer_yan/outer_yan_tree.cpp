@@ -443,24 +443,31 @@ void OuterYanTree::BuildOT(unique_ptr<LogicalOperator> plan) {
 }
 
 // ============================================================================
-// BuildOJT
+// BuildOJT / ConstructOJT
 // ============================================================================
 
-void OuterYanTree::BuildOJT() {
-	if (!ot) {
-		throw InternalException("OuterYanTree::BuildOJT: ot is null");
+namespace {
+
+//! Shared OJT-assembly body. Reads `tree.ot_relations_by_id` and
+//! `tree.ot_joins_by_order` (both populated by `BuildOT` and stable across
+//! Simplification / Desimplification join-kind mutations), returns a fresh
+//! OJT without persisting it. `BuildOJT` and `ConstructOJT` are thin
+//! wrappers that choose where to store the result.
+unique_ptr<OrderedJoinTree> BuildOJTImpl(OuterYanTree &tree) {
+	if (!tree.HasOT()) {
+		throw InternalException("OuterYanTree::BuildOJTImpl: ot is null");
 	}
 
-	const auto &ot_relations = ot_relations_by_id;
-	const auto &ot_joins = ot_joins_by_order;
+	const auto &ot_relations = tree.ot_relations_by_id;
+	const auto &ot_joins = tree.ot_joins_by_order;
 
 	if (ot_relations.empty()) {
-		throw NotImplementedException("OuterYanTree::BuildOJT: OT has no base relations");
+		throw NotImplementedException("OuterYanTree::BuildOJTImpl: OT has no base relations");
 	}
 	for (idx_t r = 0; r < ot_relations.size(); r++) {
 		if (!ot_relations[r]) {
 			throw InternalException(
-			    "OuterYanTree::BuildOJT: missing OT relation for relation_id %llu", r);
+			    "OuterYanTree::BuildOJTImpl: missing OT relation for relation_id %llu", r);
 		}
 	}
 
@@ -476,11 +483,10 @@ void OuterYanTree::BuildOJT() {
 	if (ot_joins.empty()) {
 		if (nodes_by_id.size() != 1) {
 			throw InternalException(
-			    "OuterYanTree::BuildOJT: %llu relations with 0 joins (disconnected OT)",
+			    "OuterYanTree::BuildOJTImpl: %llu relations with 0 joins (disconnected OT)",
 			    nodes_by_id.size());
 		}
-		ojt = make_uniq<OrderedJoinTree>(std::move(nodes_by_id[0]));
-		return;
+		return make_uniq<OrderedJoinTree>(std::move(nodes_by_id[0]));
 	}
 
 	vector<OJTNode *> node_pointer(nodes_by_id.size(), nullptr);
@@ -528,11 +534,11 @@ void OuterYanTree::BuildOJT() {
 			bool r_in = attached.count(right_rel) > 0;
 			if (l_in && r_in) {
 				throw NotImplementedException(
-				    "OuterYanTree::BuildOJT: cyclic join graph (both endpoints already in OJT)");
+				    "OuterYanTree::BuildOJTImpl: cyclic join graph (both endpoints already in OJT)");
 			}
 			if (!l_in && !r_in) {
 				throw InternalException(
-				    "OuterYanTree::BuildOJT: top-down step found neither endpoint in the partial "
+				    "OuterYanTree::BuildOJTImpl: top-down step found neither endpoint in the partial "
 				    "OJT (connectivity invariant violated)");
 			}
 			if (l_in) {
@@ -566,9 +572,19 @@ void OuterYanTree::BuildOJT() {
 	}
 
 	if (ojt_root_id == DConstants::INVALID_INDEX) {
-		throw InternalException("OuterYanTree::BuildOJT: OJT root not assigned");
+		throw InternalException("OuterYanTree::BuildOJTImpl: OJT root not assigned");
 	}
-	ojt = make_uniq<OrderedJoinTree>(std::move(nodes_by_id[ojt_root_id]));
+	return make_uniq<OrderedJoinTree>(std::move(nodes_by_id[ojt_root_id]));
+}
+
+} // namespace
+
+void OuterYanTree::BuildOJT() {
+	ojt = BuildOJTImpl(*this);
+}
+
+unique_ptr<OrderedJoinTree> OuterYanTree::ConstructOJT() {
+	return BuildOJTImpl(*this);
 }
 
 // ============================================================================

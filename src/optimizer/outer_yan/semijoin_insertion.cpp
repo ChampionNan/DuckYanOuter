@@ -5,22 +5,14 @@
 namespace duckdb {
 
 void SemijoinInsertion::Apply(OrderedJoinTree &ojt) {
-	// Two passes per Yannakakis-style reduction:
-	//   1. bottom-up post-order over edges
-	//   2. top-down pre-order over edges (reverse of pass 1)
+	// Consume `tree.bottom_up_pairs` then `tree.top_down_pairs` in order;
+	// for each pair, emit a LogicalSJBuild + LogicalSJProbe bound via a
+	// shared HashFilter.
 	throw NotImplementedException("SemijoinInsertion::Apply");
 }
 
-void SemijoinInsertion::BottomUpPass(OJTNode &node) {
-	throw NotImplementedException("SemijoinInsertion::BottomUpPass");
-}
-
-void SemijoinInsertion::TopDownPass(OJTNode &node) {
-	throw NotImplementedException("SemijoinInsertion::TopDownPass");
-}
-
-void SemijoinInsertion::InsertOnEdge(OJTNode &parent, OJTEdge &edge) {
-	throw NotImplementedException("SemijoinInsertion::InsertOnEdge");
+void SemijoinInsertion::InsertPair(OrderedJoinTree &ojt, const OuterYanSemiPair &pair) {
+	throw NotImplementedException("SemijoinInsertion::InsertPair");
 }
 
 } // namespace duckdb
