@@ -4,7 +4,6 @@ add_library_unity(
   aggregate_pushdown_outer.cpp
   applicability.cpp
   associative_query.cpp
-  cost_model_outer.cpp
   desimplification.cpp
   evaluation_order.cpp
   hash_filter.cpp

@@ -12,6 +12,7 @@
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
 #include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 
@@ -73,6 +74,14 @@ struct OTNode {
 	//! asserted by `IsValid`. Stable under kind-only mutations performed by
 	//! Simplification / Desimplification / Resimplification.
 	unordered_set<idx_t> subtree_relations;
+
+	//! Per-relation statistics used by OuterYanDP's cost model. Populated for
+	//! RELATION nodes by `OuterYanDP::BuildLeafRelations` via
+	//! `RelationStatisticsHelper::ExtractGetStats` (walking past single-child
+	//! LogicalFilter / LogicalProjection wrappers). Default-constructed (and
+	//! `stats_initialized = false`) on JOIN nodes; DP does not consult JOIN-
+	//! node stats.
+	RelationStats stats;
 };
 
 //! OperatorTree — first IR of the OuterYan pipeline. Pure structure: only
