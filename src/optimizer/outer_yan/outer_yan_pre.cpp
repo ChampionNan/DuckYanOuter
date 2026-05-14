@@ -95,14 +95,13 @@ void OuterYanPre::TopDownPass(OuterYanTree &tree, OJTNode &node) {
 void OuterYanPre::ExtractSemiKeys(OuterYanTree &tree, RelationId build_rel,
                                   RelationId probe_rel, const OJTEdge &edge,
                                   OuterYanSemiPair &out) {
-	if (!edge.join_op ||
-	    edge.join_op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+	if (!edge.info) {
 		throw InternalException(
-		    "OuterYanPre::ExtractSemiKeys: edge.join_op is not a LogicalComparisonJoin");
+		    "OuterYanPre::ExtractSemiKeys: edge has no OTJoin payload");
 	}
-	auto &join = edge.join_op->Cast<LogicalComparisonJoin>();
-	out.keys.reserve(join.conditions.size());
-	for (const auto &cond : join.conditions) {
+	const auto &conditions = edge.info->conditions;
+	out.keys.reserve(conditions.size());
+	for (const auto &cond : conditions) {
 		// The applicability gate forces each side to be a plain
 		// BoundColumnRefExpression referencing exactly one base relation.
 		auto &lhs = cond.GetLHS().Cast<BoundColumnRefExpression>();

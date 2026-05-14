@@ -108,7 +108,8 @@ void Simplification::VisitNode(OuterYanTree &tree, OTNode &node,
 		return;
 	}
 	D_ASSERT(node.kind == OTNode::Kind::JOIN);
-	auto &join = node.origin->Cast<LogicalComparisonJoin>();
+	D_ASSERT(node.info);
+	auto &join_info = *node.info;
 
 	// (a) Collapse the join kind based on which child subtree contains a
 	//     null-rejected relation.
@@ -117,60 +118,55 @@ void Simplification::VisitNode(OuterYanTree &tree, OTNode &node,
 	const bool rhs_nullrej =
 	    SubtreeIntersectsNullRejection(*node.children[1], null_rej);
 
-	switch (join.join_type) {
+	switch (join_info.join_kind) {
 	case JoinType::INNER:
 		break;
 	case JoinType::LEFT:
 		if (rhs_nullrej) {
-			join.join_type = JoinType::INNER;
-			node.join_kind = JoinType::INNER;
+			join_info.join_kind = JoinType::INNER;
 		}
 		break;
 	case JoinType::RIGHT:
 		if (lhs_nullrej) {
-			join.join_type = JoinType::INNER;
-			node.join_kind = JoinType::INNER;
+			join_info.join_kind = JoinType::INNER;
 		}
 		break;
 	case JoinType::OUTER:
 		if (lhs_nullrej && rhs_nullrej) {
-			join.join_type = JoinType::INNER;
-			node.join_kind = JoinType::INNER;
+			join_info.join_kind = JoinType::INNER;
 		} else if (lhs_nullrej) {
 			// LHS cannot be null-introducing → drop right-preservation.
-			join.join_type = JoinType::LEFT;
-			node.join_kind = JoinType::LEFT;
+			join_info.join_kind = JoinType::LEFT;
 		} else if (rhs_nullrej) {
 			// RHS cannot be null-introducing → drop left-preservation.
-			join.join_type = JoinType::RIGHT;
-			node.join_kind = JoinType::RIGHT;
+			join_info.join_kind = JoinType::RIGHT;
 		}
 		break;
 	default:
 		throw InternalException("OuterYan Simplification: unexpected join type %s",
-		                        EnumUtil::ToString(join.join_type));
+		                        EnumUtil::ToString(join_info.join_kind));
 	}
 
 	// (b) Extend null_rej with the relations the (possibly rewritten) join
 	//     condition itself null-rejects on the preserved side(s).
-	switch (join.join_type) {
+	switch (join_info.join_kind) {
 	case JoinType::INNER:
-		null_rej.insert(node.left_child_relation_id);
-		null_rej.insert(node.right_child_relation_id);
+		null_rej.insert(join_info.cond_left_relation_id);
+		null_rej.insert(join_info.cond_right_relation_id);
 		break;
 	case JoinType::LEFT:
 		// R1 ⟕ R2 on R1.x = R2.y: matched R2 rows must have R2.y non-null.
-		null_rej.insert(node.right_child_relation_id);
+		null_rej.insert(join_info.cond_right_relation_id);
 		break;
 	case JoinType::RIGHT:
 		// R1 ⟖ R2 on R1.x = R2.y: matched R1 rows must have R1.x non-null.
-		null_rej.insert(node.left_child_relation_id);
+		null_rej.insert(join_info.cond_left_relation_id);
 		break;
 	case JoinType::OUTER:
 		break;
 	default:
 		throw InternalException("OuterYan Simplification: unexpected join type %s",
-		                        EnumUtil::ToString(join.join_type));
+		                        EnumUtil::ToString(join_info.join_kind));
 	}
 
 	VisitNode(tree, *node.children[0], null_rej);

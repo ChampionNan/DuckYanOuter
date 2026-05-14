@@ -88,17 +88,20 @@ optional<idx_t> SingleColumnRefTableIndex(const Expression &expr) {
 }
 
 bool CheckShape(const OTNode &node, string *reason) {
-	if (!node.origin) {
-		return Fail(reason, "OTNode has null origin");
-	}
 	if (node.kind == OTNode::Kind::JOIN) {
-		if (node.origin->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-			return Fail(reason, "JOIN OTNode origin is not LogicalComparisonJoin");
+		if (!node.info) {
+			return Fail(reason, "JOIN OTNode has null info");
+		}
+		if (node.info->conditions.empty()) {
+			return Fail(reason, "JOIN OTNode has no conditions");
 		}
 		if (!node.children[0] || !node.children[1]) {
 			return Fail(reason, "JOIN OTNode missing one or both children");
 		}
 		return CheckShape(*node.children[0], reason) && CheckShape(*node.children[1], reason);
+	}
+	if (!node.origin) {
+		return Fail(reason, "RELATION OTNode has null origin");
 	}
 	if (node.children[0] || node.children[1]) {
 		return Fail(reason, "RELATION OTNode has non-null children");
@@ -166,27 +169,30 @@ bool CheckSubtreeRelations(const OTNode &node, unordered_set<idx_t> &out, string
 }
 
 //! Per-JOIN canonical-form assertion: condition LHS must resolve to
-//! `left_child_relation_id` inside `children[0]` (and `left_child_relation_id`
-//! lies in `children[0]->subtree_relations`); same for RHS / right.
+//! `info->cond_left_relation_id` inside `children[0]` (and that relation lies
+//! in `children[0]->subtree_relations`); same for RHS / right.
 bool CheckJoinConditionAlignment(const OTNode &node, string *reason) {
 	if (node.kind != OTNode::Kind::JOIN) {
 		return true;
 	}
-	if (!node.children[0]->subtree_relations.count(node.left_child_relation_id)) {
-		return Fail(reason, StringUtil::Format(
-		                        "JOIN left_child_relation_id %llu not in children[0] subtree",
-		                        node.left_child_relation_id));
+	if (!node.info) {
+		return Fail(reason, "JOIN OTNode has null info");
 	}
-	if (!node.children[1]->subtree_relations.count(node.right_child_relation_id)) {
+	const auto &info = *node.info;
+	if (!node.children[0]->subtree_relations.count(info.cond_left_relation_id)) {
 		return Fail(reason, StringUtil::Format(
-		                        "JOIN right_child_relation_id %llu not in children[1] subtree",
-		                        node.right_child_relation_id));
+		                        "JOIN cond_left_relation_id %llu not in children[0] subtree",
+		                        info.cond_left_relation_id));
 	}
-	auto &join = node.origin->Cast<LogicalComparisonJoin>();
-	if (join.conditions.empty()) {
+	if (!node.children[1]->subtree_relations.count(info.cond_right_relation_id)) {
+		return Fail(reason, StringUtil::Format(
+		                        "JOIN cond_right_relation_id %llu not in children[1] subtree",
+		                        info.cond_right_relation_id));
+	}
+	if (info.conditions.empty()) {
 		return Fail(reason, "JOIN node has no conditions");
 	}
-	auto &cond = join.conditions[0];
+	const auto &cond = info.conditions[0];
 	auto lhs_ti = SingleColumnRefTableIndex(cond.GetLHS());
 	auto rhs_ti = SingleColumnRefTableIndex(cond.GetRHS());
 	if (!lhs_ti || !rhs_ti) {
@@ -198,11 +204,11 @@ bool CheckJoinConditionAlignment(const OTNode &node, string *reason) {
 		                        "JOIN conditions[0] LHS table_index %llu absent from children[0]",
 		                        *lhs_ti));
 	}
-	if (lhs_rel != node.left_child_relation_id) {
+	if (lhs_rel != info.cond_left_relation_id) {
 		return Fail(reason, StringUtil::Format(
 		                        "JOIN conditions[0] LHS resolves to relation %llu but "
-		                        "left_child_relation_id is %llu",
-		                        lhs_rel, node.left_child_relation_id));
+		                        "cond_left_relation_id is %llu",
+		                        lhs_rel, info.cond_left_relation_id));
 	}
 	idx_t rhs_rel = LookupRelationByTableIndex(*node.children[1], *rhs_ti);
 	if (rhs_rel == DConstants::INVALID_INDEX) {
@@ -210,11 +216,11 @@ bool CheckJoinConditionAlignment(const OTNode &node, string *reason) {
 		                        "JOIN conditions[0] RHS table_index %llu absent from children[1]",
 		                        *rhs_ti));
 	}
-	if (rhs_rel != node.right_child_relation_id) {
+	if (rhs_rel != info.cond_right_relation_id) {
 		return Fail(reason, StringUtil::Format(
 		                        "JOIN conditions[0] RHS resolves to relation %llu but "
-		                        "right_child_relation_id is %llu",
-		                        rhs_rel, node.right_child_relation_id));
+		                        "cond_right_relation_id is %llu",
+		                        rhs_rel, info.cond_right_relation_id));
 	}
 	return CheckJoinConditionAlignment(*node.children[0], reason) &&
 	       CheckJoinConditionAlignment(*node.children[1], reason);
@@ -225,14 +231,16 @@ bool CheckCommonRelations(const OTNode &node, string *reason) {
 	if (node.kind != OTNode::Kind::JOIN) {
 		return true;
 	}
+	D_ASSERT(node.info);
+	const auto &info = *node.info;
 	for (idx_t side = 0; side < 2; side++) {
 		const auto &child = *node.children[side];
 		if (child.kind != OTNode::Kind::JOIN) {
 			continue;
 		}
 		const bool overlap =
-		    child.subtree_relations.count(node.left_child_relation_id) > 0 ||
-		    child.subtree_relations.count(node.right_child_relation_id) > 0;
+		    child.subtree_relations.count(info.cond_left_relation_id) > 0 ||
+		    child.subtree_relations.count(info.cond_right_relation_id) > 0;
 		if (!overlap) {
 			return Fail(reason,
 			            "JOIN/JOIN pair shares no relation with parent's condition "
@@ -263,25 +271,30 @@ void CanonicaliseConditions(OTNode &node) {
 	if (node.kind == OTNode::Kind::RELATION) {
 		return;
 	}
+	D_ASSERT(node.info);
+	auto &info = *node.info;
 	auto &left_set = node.children[0]->subtree_relations;
 	auto &right_set = node.children[1]->subtree_relations;
-	const bool lhs_in_left = left_set.count(node.left_child_relation_id) > 0;
-	const bool rhs_in_right = right_set.count(node.right_child_relation_id) > 0;
+	const bool lhs_in_left = left_set.count(info.cond_left_relation_id) > 0;
+	const bool rhs_in_right = right_set.count(info.cond_right_relation_id) > 0;
 	if (!lhs_in_left || !rhs_in_right) {
-		const bool lhs_in_right = right_set.count(node.left_child_relation_id) > 0;
-		const bool rhs_in_left = left_set.count(node.right_child_relation_id) > 0;
+		const bool lhs_in_right = right_set.count(info.cond_left_relation_id) > 0;
+		const bool rhs_in_left = left_set.count(info.cond_right_relation_id) > 0;
 		if (!lhs_in_right || !rhs_in_left) {
 			throw InternalException(
 			    "OperatorTree::Finalize: JOIN condition relations do not match "
 			    "either children orientation (LHS rel=%llu, RHS rel=%llu)",
-			    node.left_child_relation_id, node.right_child_relation_id);
+			    info.cond_left_relation_id, info.cond_right_relation_id);
 		}
-		auto &join = node.origin->Cast<LogicalComparisonJoin>();
-		if (join.conditions.empty()) {
+		if (info.conditions.empty()) {
 			throw InternalException("OperatorTree::Finalize: JOIN node has no conditions");
 		}
-		join.conditions[0].Swap();
-		std::swap(node.left_child_relation_id, node.right_child_relation_id);
+		// Swap every condition (keeps cond_left_relation_id meaningful for
+		// the entire vector) and swap the side-id labels in lock-step.
+		for (auto &cond : info.conditions) {
+			cond.Swap();
+		}
+		std::swap(info.cond_left_relation_id, info.cond_right_relation_id);
 	}
 	CanonicaliseConditions(*node.children[0]);
 	CanonicaliseConditions(*node.children[1]);

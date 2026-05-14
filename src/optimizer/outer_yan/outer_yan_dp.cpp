@@ -97,62 +97,59 @@ void OuterYanDP::BuildEdgesFromOT(OuterYanTree &tree) {
 	auto &ot_joins = tree.ot_joins_by_order;
 	auto &ot_relations = tree.ot_relations_by_id;
 
+	ot_joins_by_filter_index.clear();
+
 	for (auto *jn : ot_joins) {
-		if (!jn || jn->kind != OTNode::Kind::JOIN || !jn->origin) {
+		if (!jn || jn->kind != OTNode::Kind::JOIN || !jn->info) {
 			throw InternalException("OuterYanDP: malformed JOIN OTNode in ot_joins_by_order");
 		}
-		auto &cmp = jn->origin->Cast<LogicalComparisonJoin>();
-		if (cmp.conditions.empty()) {
+		auto &join_info = *jn->info;
+		if (join_info.conditions.empty()) {
 			throw InternalException("OuterYanDP: JOIN OTNode has no conditions");
 		}
 
 		// D_edge = product over conditions of max(HLL(lhs_col), HLL(rhs_col)).
 		// Each condition is its own equivalence class -- no transitivity.
 		double d_edge = 1.0;
-		auto lhs_col_first = FirstColumnRef(cmp.conditions[0].GetLHS());
-		auto rhs_col_first = FirstColumnRef(cmp.conditions[0].GetRHS());
+		auto lhs_col_first = FirstColumnRef(join_info.conditions[0].GetLHS());
+		auto rhs_col_first = FirstColumnRef(join_info.conditions[0].GetRHS());
 		if (!lhs_col_first || !rhs_col_first) {
 			throw InternalException("OuterYanDP: conditions[0] has no resolvable column refs");
 		}
 		ColumnBinding lhs_binding = lhs_col_first->binding;
 		ColumnBinding rhs_binding = rhs_col_first->binding;
 
-		for (auto &cond : cmp.conditions) {
+		for (auto &cond : join_info.conditions) {
 			auto l_col = FirstColumnRef(cond.GetLHS());
 			auto r_col = FirstColumnRef(cond.GetRHS());
 			if (!l_col || !r_col) {
 				continue;
 			}
-			idx_t l_d = LookupDistinctCount(ot_relations[jn->left_child_relation_id]->stats,
+			idx_t l_d = LookupDistinctCount(ot_relations[join_info.cond_left_relation_id]->stats,
 			                                l_col->binding.column_index);
-			idx_t r_d = LookupDistinctCount(ot_relations[jn->right_child_relation_id]->stats,
+			idx_t r_d = LookupDistinctCount(ot_relations[join_info.cond_right_relation_id]->stats,
 			                                r_col->binding.column_index);
 			d_edge *= static_cast<double>(MaxValue<idx_t>(MaxValue<idx_t>(l_d, r_d), 1));
 		}
+		join_info.distinct_count = MaxValue<double>(d_edge, 1.0);
 
-		auto &left_set = set_manager.GetJoinRelation(RelationIndex(jn->left_child_relation_id));
-		auto &right_set = set_manager.GetJoinRelation(RelationIndex(jn->right_child_relation_id));
+		auto &left_set = set_manager.GetJoinRelation(RelationIndex(join_info.cond_left_relation_id));
+		auto &right_set = set_manager.GetJoinRelation(RelationIndex(join_info.cond_right_relation_id));
 		auto &combined_set = set_manager.Union(left_set, right_set);
 
 		// One FilterInfo carrier per OT JOIN. `filter` stays null -- our cost
 		// code never dereferences it; QueryGraphEdges uses only left_set /
 		// right_set / set for indexing.
 		auto fi = make_uniq<FilterInfo>(unique_ptr<Expression>(), combined_set, filter_infos.size(),
-		                                static_cast<JoinType>(jn->join_kind));
+		                                static_cast<JoinType>(join_info.join_kind));
 		fi->SetLeftSet(&left_set);
 		fi->SetRightSet(&right_set);
 		fi->left_binding = lhs_binding;
 		fi->right_binding = rhs_binding;
 
-		OuterYanEdgeInfo info;
-		info.kind = jn->join_kind;
-		info.left_relation = jn->left_child_relation_id;
-		info.right_relation = jn->right_child_relation_id;
-		info.origin_join = jn;
-		info.distinct_count = MaxValue<double>(d_edge, 1.0);
-
+		// Lock-step indexing: ot_joins_by_filter_index[fi->filter_index] == jn.
+		ot_joins_by_filter_index.push_back(jn);
 		auto *fi_ptr = fi.get();
-		edge_meta[fi_ptr] = info;
 		filter_infos.push_back(std::move(fi));
 
 		query_graph.CreateEdge(left_set, right_set, fi_ptr);
@@ -348,12 +345,15 @@ unique_ptr<DPJoinNode> OuterYanDP::CreateJoinTree(JoinRelationSet &set,
 	if (!chosen_filter) {
 		throw InternalException("OuterYanDP::CreateJoinTree: no non-cross-product connection found");
 	}
-	auto meta_it = edge_meta.find(chosen_filter.get());
-	if (meta_it == edge_meta.end()) {
-		throw InternalException("OuterYanDP::CreateJoinTree: missing edge metadata");
+	auto fi_idx = chosen_filter->filter_index;
+	if (fi_idx >= ot_joins_by_filter_index.size() || !ot_joins_by_filter_index[fi_idx] ||
+	    !ot_joins_by_filter_index[fi_idx]->info) {
+		throw InternalException("OuterYanDP::CreateJoinTree: missing OTJoin for filter_index %llu",
+		                        fi_idx);
 	}
+	const auto &join_info = *ot_joins_by_filter_index[fi_idx]->info;
 
-	double combined_card = EdgeCardinality(left.set, right.set, left, right, meta_it->second);
+	double combined_card = EdgeCardinality(left.set, right.set, left, right, join_info);
 	double cost = ComputeCost(left, right, combined_card);
 
 	auto result = make_uniq<DPJoinNode>(set, best_connection, left.set, right.set, cost);
@@ -369,10 +369,10 @@ unique_ptr<DPJoinNode> OuterYanDP::CreateJoinTree(JoinRelationSet &set,
 
 double OuterYanDP::EdgeCardinality(JoinRelationSet &left_set, JoinRelationSet &right_set,
                                     const DPJoinNode &left_plan, const DPJoinNode &right_plan,
-                                    const OuterYanEdgeInfo &edge_info) {
+                                    const OTJoin &info) {
 	bool left_holds_lhs = false;
 	for (idx_t i = 0; i < left_set.count; i++) {
-		if (left_set.relations[i].index == edge_info.left_relation) {
+		if (left_set.relations[i].index == info.cond_left_relation_id) {
 			left_holds_lhs = true;
 			break;
 		}
@@ -380,7 +380,7 @@ double OuterYanDP::EdgeCardinality(JoinRelationSet &left_set, JoinRelationSet &r
 	if (!left_holds_lhs) {
 		bool right_holds_lhs = false;
 		for (idx_t i = 0; i < right_set.count; i++) {
-			if (right_set.relations[i].index == edge_info.left_relation) {
+			if (right_set.relations[i].index == info.cond_left_relation_id) {
 				right_holds_lhs = true;
 				break;
 			}
@@ -392,7 +392,7 @@ double OuterYanDP::EdgeCardinality(JoinRelationSet &left_set, JoinRelationSet &r
 
 	const DPJoinNode &L = left_holds_lhs ? left_plan : right_plan;
 	const DPJoinNode &R = left_holds_lhs ? right_plan : left_plan;
-	OuterYanJoinKind kind = edge_info.kind;
+	OuterYanJoinKind kind = info.join_kind;
 	if (!left_holds_lhs) {
 		// Orientation flipped: relabel LEFT <-> RIGHT so the formula reads
 		// in terms of the chosen (L, R) operands.
@@ -401,7 +401,7 @@ double OuterYanDP::EdgeCardinality(JoinRelationSet &left_set, JoinRelationSet &r
 
 	const double t_l = static_cast<double>(L.cardinality);
 	const double t_r = static_cast<double>(R.cardinality);
-	const double d_e = edge_info.distinct_count;
+	const double d_e = info.distinct_count;
 	const double t_inner = (t_l * t_r) / d_e;
 
 	const double p_l_not_r = MaxValue<double>(0.0, 1.0 - (t_r / d_e));
@@ -476,7 +476,7 @@ bool OuterYanDP::SolveApproximately() {
 // Materialisation -- DP plan back to OT
 // ============================================================================
 
-FilterInfo &OuterYanDP::PickConnectingEdge(const DPJoinNode &node) {
+const FilterInfo &OuterYanDP::PickConnectingEdge(const DPJoinNode &node) {
 	if (!node.info) {
 		throw InternalException("OuterYanDP::PickConnectingEdge: leaf DPJoinNode");
 	}
@@ -496,14 +496,15 @@ unique_ptr<OTNode> OuterYanDP::MaterializeNode(JoinRelationSet &set, OuterYanTre
 	auto &node = *plan_it->second;
 
 	if (set.count == 1) {
-		// Leaf: clone the original RELATION OTNode (origin pointer + stats
-		// kept; subtree_relations is repopulated by Finalize).
+		// Leaf: clone the original RELATION OTNode. The base-op pointer, PK/FK
+		// flag, and stats are kept; subtree_relations is repopulated by Finalize.
 		auto rel_id = set.relations[0].index;
 		auto *src = tree.ot_relations_by_id[rel_id];
 		auto leaf = make_uniq<OTNode>();
 		leaf->kind = OTNode::Kind::RELATION;
 		leaf->origin = src->origin;
 		leaf->relation_id = rel_id;
+		leaf->is_pk = src->is_pk;
 		leaf->stats = src->stats;
 		return leaf;
 	}
@@ -511,20 +512,23 @@ unique_ptr<OTNode> OuterYanDP::MaterializeNode(JoinRelationSet &set, OuterYanTre
 	auto left_child = MaterializeNode(node.left_set, tree, next_order);
 	auto right_child = MaterializeNode(node.right_set, tree, next_order);
 
-	auto &chosen_filter = PickConnectingEdge(node);
-	auto meta_it = edge_meta.find(&chosen_filter);
-	if (meta_it == edge_meta.end()) {
-		throw InternalException("OuterYanDP::MaterializeNode: missing edge metadata");
+	const auto &chosen_filter = PickConnectingEdge(node);
+	auto fi_idx = chosen_filter.filter_index;
+	if (fi_idx >= ot_joins_by_filter_index.size() || !ot_joins_by_filter_index[fi_idx]) {
+		throw InternalException("OuterYanDP::MaterializeNode: missing OTJoin for filter_index %llu",
+		                        fi_idx);
 	}
-	auto *origin_join = meta_it->second.origin_join;
+	auto *origin_join = ot_joins_by_filter_index[fi_idx];
+	if (!origin_join->info) {
+		throw InternalException("OuterYanDP::MaterializeNode: OT JOIN's info already moved");
+	}
 
 	auto join = make_uniq<OTNode>();
 	join->kind = OTNode::Kind::JOIN;
-	join->origin = origin_join->origin;
-	join->join_kind = origin_join->join_kind;
-	join->original_join_kind = origin_join->original_join_kind;
-	join->left_child_relation_id = origin_join->left_child_relation_id;
-	join->right_child_relation_id = origin_join->right_child_relation_id;
+	// Transfer ownership of the OTJoin payload to the new node. The old OT
+	// JOIN OTNode becomes inert; it will be destroyed when RebuildOT swaps
+	// the OT root.
+	join->info = std::move(origin_join->info);
 	join->children[0] = std::move(left_child);
 	join->children[1] = std::move(right_child);
 	join->order = ++next_order;

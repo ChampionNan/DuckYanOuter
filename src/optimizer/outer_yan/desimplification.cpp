@@ -76,10 +76,15 @@ OuterYanJoinKind Desimplification::NewLowerKind(CellTag tag) {
 // ============================================================================
 
 bool Desimplification::TryMatch(OTNode &P, OTNode &D, bool right_assoc, bool dry_run) {
+	D_ASSERT(P.info && D.info);
+	auto &P_info = *P.info;
+	auto &D_info = *D.info;
+
 	// The shared middle relation between P and D flows through P's condition:
 	//   right_assoc -> the LHS relation of P (which lives in P.children[0]).
 	//   left_assoc  -> the RHS relation of P (which lives in P.children[1]).
-	const idx_t mid_rel = right_assoc ? P.left_child_relation_id : P.right_child_relation_id;
+	const idx_t mid_rel =
+	    right_assoc ? P_info.cond_left_relation_id : P_info.cond_right_relation_id;
 	if (!D.subtree_relations.count(mid_rel)) {
 		return false; // P and D are not adjacent through P's condition.
 	}
@@ -105,15 +110,15 @@ bool Desimplification::TryMatch(OTNode &P, OTNode &D, bool right_assoc, bool dry
 	// any rewrite kind produced by the table is flipped back before commit.
 	const bool invert_D = right_assoc ? in_D_left : in_D_right;
 	const OuterYanJoinKind eff_D_kind =
-	    invert_D ? FlipOuterYanJoinKind(D.join_kind) : D.join_kind;
+	    invert_D ? FlipOuterYanJoinKind(D_info.join_kind) : D_info.join_kind;
 
-	const CellTag tag = right_assoc ? LookupRightAssoc(eff_D_kind, P.join_kind)
-	                                : LookupLeftAssoc(P.join_kind, eff_D_kind);
+	const CellTag tag = right_assoc ? LookupRightAssoc(eff_D_kind, P_info.join_kind)
+	                                : LookupLeftAssoc(P_info.join_kind, eff_D_kind);
 	if (tag == CellTag::INVALID) {
 		throw InternalException(
 		    "Desimplification: non-simple query at (P=%s, D=%s) under %s-assoc -- "
 		    "simplification was incomplete",
-		    EnumUtil::ToString(P.join_kind), EnumUtil::ToString(D.join_kind),
+		    EnumUtil::ToString(P_info.join_kind), EnumUtil::ToString(D_info.join_kind),
 		    right_assoc ? "right" : "left");
 	}
 	if (tag == CellTag::OK) {
@@ -125,10 +130,10 @@ bool Desimplification::TryMatch(OTNode &P, OTNode &D, bool right_assoc, bool dry
 
 	const OuterYanJoinKind new_kind = NewLowerKind(tag);
 	const OuterYanJoinKind committed = invert_D ? FlipOuterYanJoinKind(new_kind) : new_kind;
-	if (committed == D.join_kind) {
+	if (committed == D_info.join_kind) {
 		return false;
 	}
-	D.join_kind = committed;
+	D_info.join_kind = committed;
 	return true;
 }
 

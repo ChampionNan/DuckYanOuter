@@ -25,30 +25,6 @@
 namespace duckdb {
 class ClientContext;
 
-//! Per-edge metadata recorded once per OT JOIN at edge-build time. Keyed by
-//! the carrier `FilterInfo *` stored inside `QueryGraphEdges` -- we do not
-//! subclass `FilterInfo` so the join_order module stays untouched.
-//!
-//! Orientation rule. `left_relation` and `right_relation` are the LHS and RHS
-//! relations of the OT JOIN's canonical `conditions[0]`. At cost time the DP
-//! step checks which of (left_set, right_set) contains `left_relation`; that
-//! side is treated as "L" in the user's outer-join formula. This keeps the
-//! LEFT / RIGHT distinction stable under any reordering.
-struct OuterYanEdgeInfo {
-	OuterYanJoinKind kind;
-	RelationId left_relation;
-	RelationId right_relation;
-	//! OT JOIN whose `origin` LogicalComparisonJoin is reused during
-	//! materialisation. One DP edge corresponds to exactly one OT JOIN.
-	OTNode *origin_join;
-	//! `D_edge = product over JoinConditions of max(HLL_distinct(L_col),
-	//! HLL_distinct(R_col))`. Each condition contributes a private
-	//! multiplicative factor -- no transitive equivalence across conditions
-	//! or across edges. Used as the denominator in
-	//! `T_inner = T_L * T_R / D_edge`.
-	double distinct_count;
-};
-
 //! OuterYanDP -- second OuterYan pass. Bottom-up DPccp on OT, mirroring
 //! `PlanEnumerator::SolveJoinOrderExactly` ([plan_enumerator.cpp]) with two
 //! deviations:
@@ -105,12 +81,13 @@ private:
 	                                      DPJoinNode &left, DPJoinNode &right);
 
 	// ---- cost ----
-	//! Output cardinality of `L_set joinKind R_set` via `edge_info` of kind
-	//! `edge_info.kind`. Applies the user's outer-join correction formula on
-	//! top of `T_inner = T_L * T_R / D_edge`.
+	//! Output cardinality of `L_set joinKind R_set` via the OT JOIN's owned
+	//! metadata. Applies the user's outer-join correction formula on top of
+	//! `T_inner = T_L * T_R / D_edge`. Orientation is decided by checking
+	//! which side contains `info.cond_left_relation_id`.
 	double EdgeCardinality(JoinRelationSet &left_set, JoinRelationSet &right_set,
 	                       const DPJoinNode &left_plan, const DPJoinNode &right_plan,
-	                       const OuterYanEdgeInfo &edge_info);
+	                       const OTJoin &info);
 	double ComputeCost(const DPJoinNode &left, const DPJoinNode &right, double combined_cardinality);
 
 	// ---- materialisation ----
@@ -121,7 +98,7 @@ private:
 
 	//! Pick the FilterInfo on a NeighborInfo that represents the (unique)
 	//! OT JOIN bridging two subsets in the acyclic graph. Errors if none.
-	FilterInfo &PickConnectingEdge(const DPJoinNode &node);
+	const FilterInfo &PickConnectingEdge(const DPJoinNode &node);
 
 	// ---- private static helpers (pure utilities, DP-only) ----
 	//! Walk past single-child LogicalFilter / LogicalProjection wrappers to
@@ -149,8 +126,12 @@ private:
 	QueryGraphEdges query_graph;
 	//! Storage for FilterInfo carriers; pointers handed to QueryGraphEdges.
 	vector<unique_ptr<FilterInfo>> filter_infos;
-	//! Side-table from FilterInfo* -> OuterYan-specific edge metadata.
-	unordered_map<FilterInfo *, OuterYanEdgeInfo> edge_meta;
+	//! Recovers the originating OT JOIN OTNode for a chosen DP edge:
+	//!   ot_joins_by_filter_index[fi->filter_index] == jn
+	//! Indexed by FilterInfo::filter_index in lock-step with `filter_infos`,
+	//! mirroring DuckDB's `filters_and_bindings` indexing scheme. No hash
+	//! map.
+	vector<OTNode *> ot_joins_by_filter_index;
 	//! DP memo: best plan per relation set. Same shape as
 	//! `PlanEnumerator::plans`.
 	reference_map_t<JoinRelationSet, unique_ptr<DPJoinNode>> plans;

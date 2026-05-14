@@ -129,8 +129,10 @@ public:
 
 private:
 	//! Original LogicalPlan, owned for the wrapper's lifetime so that raw
-	//! `OTNode::origin` / `OJTEdge::join_op` / `OJTNode::base_op` pointers
-	//! stay valid.
+	//! base-relation pointers (`OTNode::origin` on RELATION nodes,
+	//! `OJTNode::base_op`) stay valid through plan rebuild. JOIN-side
+	//! metadata is owned by the IRs themselves (OTJoin), so the source
+	//! plan's join operators are not consulted after BuildOT.
 	unique_ptr<LogicalOperator> source_plan;
 	ApplicabilityResult applicability;
 	unique_ptr<OperatorTree> ot;

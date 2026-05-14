@@ -233,6 +233,8 @@ private:
 		node->kind = OTNode::Kind::RELATION;
 		node->origin = &op;
 		node->relation_id = next_relation_id++;
+		// Cache PK/FK once; later passes never re-walk `origin`.
+		node->is_pk = CheckPKFK(op);
 		MapTableToRelId(op, node->relation_id, tree.table_to_relation);
 		if (node->relation_id >= tree.ot_relations_by_id.size()) {
 			tree.ot_relations_by_id.resize(node->relation_id + 1, nullptr);
@@ -250,9 +252,16 @@ private:
 		auto &join = op.Cast<LogicalComparisonJoin>();
 		auto node = make_uniq<OTNode>();
 		node->kind = OTNode::Kind::JOIN;
-		node->origin = &op;
-		node->join_kind = join.join_type;
-		node->original_join_kind = join.join_type;
+
+		auto info = make_uniq<OTJoin>();
+		info->join_kind = join.join_type;
+		info->original_join_kind = join.join_type;
+		info->conditions.reserve(join.conditions.size());
+		for (const auto &cond : join.conditions) {
+			info->conditions.push_back(cond.Copy());
+		}
+		node->info = std::move(info);
+
 		joins_with_depth.push_back({node.get(), depth});
 		node->children[0] = BuildNode(*op.children[0], depth + 1);
 		node->children[1] = BuildNode(*op.children[1], depth + 1);
@@ -412,12 +421,13 @@ private:
 	void SetJoinTwoSides() {
 		for (auto &entry : joins_with_depth) {
 			auto *node = entry.node;
-			auto &join = node->origin->Cast<LogicalComparisonJoin>();
-			if (join.conditions.empty()) {
+			D_ASSERT(node->info);
+			auto &info = *node->info;
+			if (info.conditions.empty()) {
 				throw NotImplementedException(
 				    "LogicalPlanToOT: cross product (join with no conditions)");
 			}
-			auto &cond = join.conditions[0];
+			auto &cond = info.conditions[0];
 			auto left = LookupSingleRelation(cond.GetLHS(), tree.table_to_relation);
 			auto right = LookupSingleRelation(cond.GetRHS(), tree.table_to_relation);
 			if (!left || !right) {
@@ -425,8 +435,8 @@ private:
 				    "LogicalPlanToOT: could not resolve both sides of a join condition "
 				    "to a single OT base relation");
 			}
-			node->left_child_relation_id = *left;
-			node->right_child_relation_id = *right;
+			info.cond_left_relation_id = *left;
+			info.cond_right_relation_id = *right;
 		}
 	}
 };
@@ -501,8 +511,13 @@ unique_ptr<OrderedJoinTree> BuildOJTImpl(OuterYanTree &tree) {
 	for (idx_t step = 0; step < n_joins; step++) {
 		idx_t idx = n_joins - 1 - step;
 		auto *ot_join = ot_joins[idx];
-		idx_t left_rel = ot_join->left_child_relation_id;
-		idx_t right_rel = ot_join->right_child_relation_id;
+		if (!ot_join->info) {
+			throw InternalException(
+			    "OuterYanTree::BuildOJTImpl: OT JOIN node has null info");
+		}
+		auto &ot_info = *ot_join->info;
+		idx_t left_rel = ot_info.cond_left_relation_id;
+		idx_t right_rel = ot_info.cond_right_relation_id;
 
 		idx_t parent_id;
 		idx_t child_id;
@@ -511,8 +526,9 @@ unique_ptr<OrderedJoinTree> BuildOJTImpl(OuterYanTree &tree) {
 			bool right_extends = false;
 			if (n_joins >= 2) {
 				auto *next_join = ot_joins[idx - 1];
-				idx_t nl = next_join->left_child_relation_id;
-				idx_t nr = next_join->right_child_relation_id;
+				D_ASSERT(next_join->info);
+				idx_t nl = next_join->info->cond_left_relation_id;
+				idx_t nr = next_join->info->cond_right_relation_id;
 				left_extends = (left_rel == nl || left_rel == nr);
 				right_extends = (right_rel == nl || right_rel == nr);
 			}
@@ -551,19 +567,21 @@ unique_ptr<OrderedJoinTree> BuildOJTImpl(OuterYanTree &tree) {
 			attached.insert(child_id);
 		}
 
-		auto *origin_join = ot_join->origin;
-		bool left_pk = CheckPKFK(*origin_join->children[0]);
-		bool right_pk = CheckPKFK(*origin_join->children[1]);
+		// PK/FK is a per-relation property cached at BuildOT time.
+		bool left_pk = ot_relations[left_rel]->is_pk;
+		bool right_pk = ot_relations[right_rel]->is_pk;
 		bool child_pk = (child_id == left_rel) ? left_pk : right_pk;
 
 		bool parent_is_left = (parent_id == left_rel);
 
 		OJTEdge edge;
-		edge.kind = CheckOuterYanJoinFlip(ot_join->join_kind, parent_is_left);
+		edge.kind = CheckOuterYanJoinFlip(ot_info.join_kind, parent_is_left);
 		edge.original_kind =
-		    CheckOuterYanJoinFlip(ot_join->original_join_kind, parent_is_left);
+		    CheckOuterYanJoinFlip(ot_info.original_join_kind, parent_is_left);
 		edge.order = ot_join->order;
-		edge.join_op = origin_join;
+		// Move owned join metadata into the OJT edge; OT JOIN's `info` is null
+		// from here on and OT is not consulted after BuildOJT.
+		edge.info = std::move(ot_join->info);
 		edge.has_pk_fk_constraint = left_pk || right_pk;
 		edge.child_is_pk = child_pk;
 		edge.child = std::move(nodes_by_id[child_id]);
@@ -598,37 +616,9 @@ struct EdgeBuildInfo {
 	idx_t child_rel;
 	OuterYanJoinKind kind;
 	idx_t order;
-	LogicalOperator *join_op;
-	bool parent_was_left;
+	//! Non-owning view into OJTEdge::info; lifetime matches the OJT.
+	OTJoin *join_info;
 };
-
-void CollectTablesUnder(const LogicalOperator &op, unordered_set<idx_t> &out) {
-	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
-		out.insert(get.table_index.index);
-	}
-	for (auto &child : op.children) {
-		if (child) {
-			CollectTablesUnder(*child, out);
-		}
-	}
-}
-
-bool ParentIsOnOriginalLeft(const OJTNode &parent_node, const LogicalOperator &join_op) {
-	if (!parent_node.base_op || join_op.children.size() != 2 || !join_op.children[0]) {
-		throw InternalException("OJTToLogicalPlan: malformed parent node or join_op");
-	}
-	unordered_set<idx_t> parent_tables;
-	CollectTablesUnder(*parent_node.base_op, parent_tables);
-	unordered_set<idx_t> left_tables;
-	CollectTablesUnder(*join_op.children[0], left_tables);
-	for (auto table : parent_tables) {
-		if (left_tables.count(table)) {
-			return true;
-		}
-	}
-	return false;
-}
 
 void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
                     vector<EdgeBuildInfo> &edges) {
@@ -640,20 +630,15 @@ void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
 		if (!edge.child) {
 			throw InternalException("OJTToLogicalPlan: edge has no child");
 		}
-		if (!edge.join_op) {
-			throw InternalException("OJTToLogicalPlan: edge has no join_op");
-		}
-		if (edge.join_op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-			throw InternalException(
-			    "OJTToLogicalPlan: edge.join_op is not a LogicalComparisonJoin");
+		if (!edge.info) {
+			throw InternalException("OJTToLogicalPlan: edge has no OTJoin info");
 		}
 		EdgeBuildInfo info;
 		info.parent_rel = node.relation_id;
 		info.child_rel = edge.child->relation_id;
 		info.kind = edge.kind;
 		info.order = edge.order;
-		info.join_op = edge.join_op;
-		info.parent_was_left = ParentIsOnOriginalLeft(node, *edge.join_op);
+		info.join_info = edge.info.get();
 		edges.push_back(info);
 		CollectOJTInfo(*edge.child, nodes_by_rel, edges);
 	}
@@ -696,13 +681,28 @@ void TryPushFilter(unique_ptr<LogicalOperator> &subplan, unique_ptr<Expression> 
 }
 
 unique_ptr<LogicalOperator> BuildJoinFromEdge(const EdgeBuildInfo &edge,
+                                              const JoinRelationSet &parent_set,
                                               unique_ptr<LogicalOperator> parent_plan,
                                               unique_ptr<LogicalOperator> child_plan) {
-	auto &orig_join = edge.join_op->Cast<LogicalComparisonJoin>();
+	D_ASSERT(edge.join_info);
+	const auto &info = *edge.join_info;
+
+	// Orientation: conditions[i].left is bound to info.cond_left_relation_id.
+	// If the parent subtree contains that relation, the conditions already
+	// align (parent on left). Otherwise swap each condition.
+	bool parent_contains_lhs = false;
+	for (idx_t i = 0; i < parent_set.count; i++) {
+		if (parent_set.relations[i].index == info.cond_left_relation_id) {
+			parent_contains_lhs = true;
+			break;
+		}
+	}
+
 	auto new_join = make_uniq<LogicalComparisonJoin>(edge.kind);
-	for (const auto &cond : orig_join.conditions) {
+	new_join->conditions.reserve(info.conditions.size());
+	for (const auto &cond : info.conditions) {
 		JoinCondition copy = cond.Copy();
-		if (!edge.parent_was_left) {
+		if (!parent_contains_lhs) {
 			copy.Swap();
 		}
 		new_join->conditions.push_back(std::move(copy));
@@ -789,7 +789,7 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 		subplan_memo.erase(parent_it);
 		subplan_memo.erase(child_it);
 
-		auto new_join = BuildJoinFromEdge(e, std::move(parent_plan), std::move(child_plan));
+		auto new_join = BuildJoinFromEdge(e, parent_set, std::move(parent_plan), std::move(child_plan));
 		auto &merged = set_manager.Union(parent_set, child_set);
 
 		for (idx_t i = 0; i < parent_set.count; i++) {

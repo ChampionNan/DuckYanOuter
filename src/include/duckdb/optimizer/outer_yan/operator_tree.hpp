@@ -15,6 +15,7 @@
 #include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
 #include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
 #include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 
 namespace duckdb {
 
@@ -22,16 +23,44 @@ namespace duckdb {
 //! `outer_yan_common.hpp`; they are shared by OperatorTree and
 //! OrderedJoinTree.
 
+//! Owned, self-contained metadata for a JOIN OTNode. Survives OT reordering
+//! and is moved into `OJTEdge::info` during BuildOJT. After that the original
+//! `LogicalComparisonJoin` is never consulted again — conditions live here.
+//!
+//! Acyclic-CQ invariant: every condition is between the same two base
+//! relations, so all `conditions[i].left` bindings reference
+//! `cond_left_relation_id` and all `conditions[i].right` bindings reference
+//! `cond_right_relation_id`.
+struct OTJoin {
+	OuterYanJoinKind join_kind = JoinType::INNER;
+	//! Recorded before Simplification; Resimplification (on OJT) consults
+	//! this to revert outer→outer when the chosen ordering allows it.
+	OuterYanJoinKind original_join_kind = JoinType::INNER;
+	//! Conditions deep-copied at OT construction from the original
+	//! LogicalComparisonJoin. Owned here.
+	vector<JoinCondition> conditions;
+	//! Relations referenced by `conditions[i].left` / `.right` respectively.
+	idx_t cond_left_relation_id = DConstants::INVALID_INDEX;
+	idx_t cond_right_relation_id = DConstants::INVALID_INDEX;
+	//! HLL-product cost statistic; populated by OuterYanDP::BuildEdgesFromOT.
+	double distinct_count = 1.0;
+};
+
 //! OTNode — OperatorTree node, plain struct, NOT derived from LogicalOperator.
 //!
-//! Each node holds a raw pointer back into the original plan held by
+//! RELATION nodes hold a raw pointer back into the original plan held by
 //! OuterYanTree::source_plan; ownership of the underlying LogicalOperator
 //! stays with source_plan for the OT's full lifetime.
 //!
+//! JOIN nodes do NOT reference the original LogicalComparisonJoin. All join
+//! metadata (kind, conditions, cond_left/right_relation_id) lives in `info`,
+//! deep-copied at BuildOT time. This keeps OT reordering decoupled from the
+//! source-plan operator graph.
+//!
 //! Two kinds:
-//!   - JOIN     — wraps a LogicalComparisonJoin; binary children.
-//!   - RELATION — wraps a base-relation subtree (LogicalGet, possibly under
-//!                a chain of single-child LogicalFilter / LogicalProjection).
+//!   - JOIN     — info populated; binary children.
+//!   - RELATION — origin populated (LogicalGet, possibly under a chain of
+//!                single-child LogicalFilter / LogicalProjection); no children.
 //!
 //! All filters live in OuterYanTree::filter_records, never on the node — the
 //! OT skeleton stays composed of joins and base relations only.
@@ -39,33 +68,26 @@ struct OTNode {
 	enum class Kind : uint8_t { JOIN, RELATION };
 	Kind kind;
 
+	// -- RELATION-only --
 	//! Raw pointer into OuterYanTree::source_plan. Never owned.
 	LogicalOperator *origin = nullptr;
-
-	// -- RELATION-only --
 	idx_t relation_id = 0;
+	//! Cached at BuildOT time (via CheckPKFK on `origin`). Lets BuildOJT
+	//! decide PK/FK side without re-walking the original subtree.
+	bool is_pk = false;
 
 	// -- JOIN-only --
-	OuterYanJoinKind join_kind = JoinType::INNER;
-	//! Recorded before Simplification; Resimplification (on OJT) consults
-	//! this to revert outer→outer when the chosen ordering allows it.
-	OuterYanJoinKind original_join_kind = JoinType::INNER;
+	//! Owned. Moved into OJTEdge::info during BuildOJT; null afterwards.
+	unique_ptr<OTJoin> info;
+
 	//! Build order of this join in the original plan, identical convention
 	//! to OJTEdge::order: 1-based, the deepest (closest-to-leaves) join gets
 	//! `order = 1`, and `order` strictly increases up to the root join,
 	//! which gets the largest value (== number of joins). Set by
-	//! LogicalPlanToOT and read by OTToOJT.
+	//! LogicalPlanToOT and read by OTToOJT. RELATION nodes leave it at 0.
 	idx_t order = 0;
-	//! Relations referenced by join.conditions[0] LHS and RHS respectively.
-	//! Populated during LogicalPlanToOT by walking the condition expressions
-	//! and resolving table_index → relation_id via OuterYanTree::table_to_relation.
-	//! Used by OperatorTreeIsValid (parent/child common-relation check) and
-	//! by OTToOJT (endpoint resolution without re-walking expressions).
-	idx_t left_child_relation_id = DConstants::INVALID_INDEX;
-	idx_t right_child_relation_id = DConstants::INVALID_INDEX;
 
 	//! Binary tree. JOIN: both filled. RELATION: both null.
-	//! children[0] corresponds to origin->children[0] in the original join.
 	unique_ptr<OTNode> children[2];
 
 	//! Relation IDs contained in this subtree. For RELATION, equals
@@ -100,34 +122,33 @@ public:
 		return *root;
 	}
 
-	//! Build-side step run by `LogicalPlanToOT` after `relation_id` /
-	//! `left_child_relation_id` / `right_child_relation_id` are set. Two
-	//! responsibilities:
+	//! Build-side step run by `LogicalPlanToOT` after `relation_id` and the
+	//! JOIN-side `info->cond_left_relation_id` / `cond_right_relation_id` are
+	//! set. Two responsibilities:
 	//!   1. Populate every `OTNode::subtree_relations` (post-order union).
 	//!   2. Canonicalise every JOIN so that the join condition's LHS
 	//!      relation lives in `children[0]->subtree_relations` and the RHS
 	//!      relation lives in `children[1]->subtree_relations`. When the
-	//!      original `LogicalComparisonJoin::conditions[0]` is reversed,
-	//!      swaps `cond.left` ↔ `cond.right` on the underlying join (a
-	//!      semantic no-op for INNER/LEFT/RIGHT/FULL equi/theta conditions)
-	//!      and swaps `left_child_relation_id` ↔ `right_child_relation_id`
-	//!      on the OTNode. Children are never reordered; `join_kind` is
-	//!      never changed.
+	//!      copied `info->conditions[0]` is reversed, swaps `cond.left` ↔
+	//!      `cond.right` on the owned condition (a semantic no-op for
+	//!      INNER/LEFT/RIGHT/FULL equi/theta conditions) and swaps
+	//!      `cond_left_relation_id` ↔ `cond_right_relation_id` on `info`.
+	//!      Children are never reordered; `join_kind` is never changed.
 	void Finalize();
 
 	//! Structural validity check, intended for between-pass assertions.
 	//! Verifies:
-	//!   1. Tree shape: every node is JOIN (binary, both children present)
-	//!      or RELATION (no children); origin non-null and of the matching
-	//!      type.
+	//!   1. Tree shape: every node is JOIN (info non-null, binary, both
+	//!      children present) or RELATION (origin non-null, no children).
 	//!   2. Relation-id uniqueness across all RELATION OTNodes.
 	//!   3. `subtree_relations` matches the recomputed union at every node.
-	//!   4. For every JOIN node, the conditions[0] LHS relation equals
-	//!      `left_child_relation_id` and resides in `children[0]`'s subset;
-	//!      same for RHS / `right_child_relation_id` / `children[1]`.
+	//!   4. For every JOIN node, the info->conditions[0] LHS relation
+	//!      equals `info->cond_left_relation_id` and resides in
+	//!      `children[0]`'s subset; same for RHS / `cond_right_relation_id`
+	//!      / `children[1]`.
 	//!   5. Common-relation rule (KEY): for every (parent_join, child_join)
 	//!      OTNode pair where child_join is directly under parent_join,
-	//!      {parent.left_child_relation_id, parent.right_child_relation_id}
+	//!      {parent.info->cond_left_relation_id, parent.info->cond_right_relation_id}
 	//!      and child_join's `subtree_relations` share at least one
 	//!      relation_id. Empty intersection ⇒ implicit cross product ⇒
 	//!      invalid OT.

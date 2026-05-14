@@ -16,6 +16,7 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/optimizer/join_order/relation_statistics_helper.hpp"
+#include "duckdb/optimizer/outer_yan/operator_tree.hpp"
 #include "duckdb/optimizer/outer_yan/outer_yan_common.hpp"
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/planner/expression.hpp"
@@ -57,10 +58,12 @@ struct OJTEdge {
 	//! root join (`order = n`). Derived from a post-order walk of the
 	//! original plan during `LogicalPlanToOJT`. 0 means uninitialised.
 	idx_t order = 0;
-	//! Raw pointer to the logical join operator (typically a
-	//! `LogicalComparisonJoin`) inside the original plan held by
-	//! `OrderedJoinTree::source_plan`. The OJT does not own it.
-	LogicalOperator *join_op = nullptr;
+	//! Owned join metadata (kind, original_kind, conditions,
+	//! cond_left/right_relation_id, distinct_count). Moved out of the
+	//! originating OT JOIN OTNode during BuildOJT. Replaces the prior
+	//! `LogicalOperator *join_op`: the OJT is now self-contained and no
+	//! longer reaches into the source plan for condition information.
+	unique_ptr<OTJoin> info;
 	unique_ptr<OJTNode> child;
 
 	//! Bottom-up round marker (child→parent): set iff the round inserted
