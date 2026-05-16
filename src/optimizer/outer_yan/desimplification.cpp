@@ -9,9 +9,9 @@ namespace duckdb {
 // Static lookup tables
 // ============================================================================
 
-namespace {
+using CellTag = Desimplification::CellTag;
 
-constexpr idx_t kJoinKindIndex(OuterYanJoinKind k) {
+idx_t Desimplification::JoinKindIndex(OuterYanJoinKind k) {
 	switch (k) {
 	case JoinType::INNER:
 		return 0;
@@ -25,10 +25,6 @@ constexpr idx_t kJoinKindIndex(OuterYanJoinKind k) {
 		throw InternalException("Desimplification: OTNode carries unsupported JoinType");
 	}
 }
-
-} // namespace
-
-using CellTag = Desimplification::CellTag;
 
 //! Right-assoc, indexed by [D_low.kind][D_up.kind].
 const CellTag Desimplification::kRightAssoc[4][4] = {
@@ -47,11 +43,11 @@ const CellTag Desimplification::kLeftAssoc[4][4] = {
 };
 
 CellTag Desimplification::LookupRightAssoc(OuterYanJoinKind d_low, OuterYanJoinKind d_up) {
-	return kRightAssoc[kJoinKindIndex(d_low)][kJoinKindIndex(d_up)];
+	return kRightAssoc[JoinKindIndex(d_low)][JoinKindIndex(d_up)];
 }
 
 CellTag Desimplification::LookupLeftAssoc(OuterYanJoinKind d_up, OuterYanJoinKind d_low) {
-	return kLeftAssoc[kJoinKindIndex(d_up)][kJoinKindIndex(d_low)];
+	return kLeftAssoc[JoinKindIndex(d_up)][JoinKindIndex(d_low)];
 }
 
 OuterYanJoinKind Desimplification::NewLowerKind(CellTag tag) {

@@ -68,6 +68,10 @@ private:
 	static const CellTag kRightAssoc[4][4];
 	static const CellTag kLeftAssoc[4][4];
 
+	//! Index into kRightAssoc / kLeftAssoc for a given OuterYanJoinKind.
+	//! Row/column order: INNER=0, LEFT=1, RIGHT=2, FULL(OUTER)=3.
+	static idx_t JoinKindIndex(OuterYanJoinKind k);
+
 	//! Right-assoc lookup: indexed by (D_low.kind, D_up.kind).
 	static CellTag LookupRightAssoc(OuterYanJoinKind d_low, OuterYanJoinKind d_up);
 	//! Left-assoc  lookup: indexed by (D_up.kind, D_low.kind).

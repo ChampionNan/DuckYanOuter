@@ -6,19 +6,16 @@
 
 namespace duckdb {
 
-namespace {
+OuterYanApplicability::OuterYanApplicability() {
+}
 
-void CollectColumnTables(const Expression &expr, unordered_set<idx_t> &tables) {
+void OuterYanApplicability::CollectColumnTables(const Expression &expr,
+                                                unordered_set<idx_t> &tables) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 		tables.insert(expr.Cast<BoundColumnRefExpression>().binding.table_index.index);
 	}
 	ExpressionIterator::EnumerateChildren(
 	    expr, [&](const Expression &child) { CollectColumnTables(child, tables); });
-}
-
-} // namespace
-
-OuterYanApplicability::OuterYanApplicability() {
 }
 
 ApplicabilityResult OuterYanApplicability::Check(LogicalOperator &plan) {

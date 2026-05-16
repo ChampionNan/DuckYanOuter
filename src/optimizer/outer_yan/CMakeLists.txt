@@ -3,7 +3,6 @@ add_library_unity(
   OBJECT
   aggregate_pushdown_outer.cpp
   applicability.cpp
-  associative_query.cpp
   desimplification.cpp
   evaluation_order.cpp
   hash_filter.cpp

@@ -19,6 +19,7 @@
 namespace duckdb {
 
 class LogicalComparisonJoin;
+class Expression;
 
 //! Identifier for a base relation in the OuterYan join graph.
 using RelationId = idx_t;
@@ -76,6 +77,9 @@ private:
 	// Union-find helpers for graph-cycle detection.
 	RelationId Find(RelationId x);
 	bool UnionRelations(RelationId a, RelationId b);
+
+	// Collect table_index values of all BoundColumnRefs reachable from `expr`.
+	static void CollectColumnTables(const Expression &expr, unordered_set<idx_t> &tables);
 
 private:
 	ApplicabilityResult result;
