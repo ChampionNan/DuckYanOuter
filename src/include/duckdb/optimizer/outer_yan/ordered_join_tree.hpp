@@ -23,6 +23,7 @@
 #include "duckdb/planner/logical_operator.hpp"
 
 #include <functional>
+#include <sstream>
 
 namespace duckdb {
 
@@ -152,6 +153,14 @@ public:
 	string PrintAsTree() const;
 
 private:
+	// Printer helpers.
+	static string RelationLabel(const OJTNode &node);
+	static void CollectNodes(const OJTNode &node, vector<const OJTNode *> &out);
+	static void CollectEdges(const OJTNode &node, vector<const OJTEdge *> &out);
+	static void PrintNodeRecursive(const OJTNode &node, std::ostringstream &os,
+	                               const string &indent, bool is_last_child, bool is_root,
+	                               OuterYanJoinKind incoming_kind, idx_t incoming_order);
+
 	unique_ptr<OJTNode> root;
 };
 

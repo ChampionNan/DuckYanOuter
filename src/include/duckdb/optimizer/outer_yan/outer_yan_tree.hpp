@@ -19,6 +19,7 @@
 
 namespace duckdb {
 class ClientContext;
+class JoinRelationSet;
 
 //! Wraps the full OuterYan IR pipeline: applicability → OT → OJT → plan.
 //! Holds the shared metadata that all three stages rely on, so each
@@ -128,6 +129,36 @@ public:
 	vector<OuterYanSemiPair> top_down_pairs;
 
 private:
+	//! BuildOT driver class; defined in outer_yan_tree.cpp. Nested so it can
+	//! reach the static BuildOT helpers below without exposing them.
+	class OTBuilder;
+
+	// BuildOT helpers (called from `OTBuilder`).
+	static void MapTableToRelId(const LogicalOperator &op, idx_t relation_id,
+	                            unordered_map<idx_t, RelationId> &table_to_relation);
+	static void CollectReferencedRelations(const Expression &expr,
+	                                       const unordered_map<idx_t, RelationId> &table_to_relation,
+	                                       unordered_set<idx_t> &out);
+	static optional<idx_t> LookupSingleRelation(const Expression &expr,
+	                                            const unordered_map<idx_t, RelationId> &table_to_relation);
+	static bool CheckPKFK(LogicalOperator &op);
+
+	// Shared OJT-assembly body. Called by `BuildOJT` (stores into `ojt`) and
+	// `ConstructOJT` (returns without persisting).
+	unique_ptr<OrderedJoinTree> BuildOJTImpl();
+
+	// OJTToLogicalPlan helpers.
+	static void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
+	                           vector<OJTEdge *> &edges);
+	static void PushFiltersAboveLeaf(unique_ptr<LogicalOperator> &subplan,
+	                                 vector<unique_ptr<Expression>> filters);
+	static void TryPushFilter(unique_ptr<LogicalOperator> &subplan,
+	                          unique_ptr<Expression> expr);
+	static unique_ptr<LogicalOperator> BuildJoinFromEdge(const OJTEdge &edge,
+	                                                     const JoinRelationSet &parent_set,
+	                                                     unique_ptr<LogicalOperator> parent_plan,
+	                                                     unique_ptr<LogicalOperator> child_plan);
+
 	//! Original LogicalPlan, owned for the wrapper's lifetime so that raw
 	//! base-relation pointers (`OTNode::origin` on RELATION nodes,
 	//! `OJTNode::base_op`) stay valid through plan rebuild. JOIN-side

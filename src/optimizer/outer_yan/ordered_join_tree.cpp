@@ -21,30 +21,10 @@ void OrderedJoinTree::PostOrder(std::function<void(OJTNode &, optional_ptr<OJTNo
 }
 
 // ============================================================================
-// Printers
+// Printer helpers
 // ============================================================================
 
-namespace {
-
-//! Walk down through single-child LogicalFilter / LogicalProjection wrappers
-//! to find the underlying base operator. Used by the printer to extract a
-//! human-readable label.
-const LogicalOperator *FindBaseOp(const LogicalOperator *op) {
-	while (op) {
-		if (op->type == LogicalOperatorType::LOGICAL_FILTER ||
-		    op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-			if (op->children.size() != 1 || !op->children[0]) {
-				break;
-			}
-			op = op->children[0].get();
-			continue;
-		}
-		break;
-	}
-	return op;
-}
-
-string RelationLabel(const OJTNode &node) {
+string OrderedJoinTree::RelationLabel(const OJTNode &node) {
 	const auto *base = FindBaseOp(node.base_op);
 	if (!base) {
 		return "<no base_op>";
@@ -58,7 +38,7 @@ string RelationLabel(const OJTNode &node) {
 	return EnumUtil::ToString(base->type);
 }
 
-void CollectNodes(const OJTNode &node, vector<const OJTNode *> &out) {
+void OrderedJoinTree::CollectNodes(const OJTNode &node, vector<const OJTNode *> &out) {
 	out.push_back(&node);
 	for (const auto &edge : node.children) {
 		if (edge.child) {
@@ -67,26 +47,19 @@ void CollectNodes(const OJTNode &node, vector<const OJTNode *> &out) {
 	}
 }
 
-struct EdgeRecord {
-	idx_t parent_id;
-	idx_t child_id;
-	OuterYanJoinKind kind;
-	idx_t order;
-};
-
-void CollectEdges(const OJTNode &node, vector<EdgeRecord> &out) {
+void OrderedJoinTree::CollectEdges(const OJTNode &node, vector<const OJTEdge *> &out) {
 	for (const auto &edge : node.children) {
 		if (!edge.child) {
 			continue;
 		}
-		out.push_back({node.relation_id, edge.child->relation_id, edge.kind, edge.order});
+		out.push_back(&edge);
 		CollectEdges(*edge.child, out);
 	}
 }
 
-void PrintNodeRecursive(const OJTNode &node, std::ostringstream &os, const string &indent,
-                        bool is_last_child, bool is_root, OuterYanJoinKind incoming_kind,
-                        idx_t incoming_order) {
+void OrderedJoinTree::PrintNodeRecursive(const OJTNode &node, std::ostringstream &os,
+                                         const string &indent, bool is_last_child, bool is_root,
+                                         OuterYanJoinKind incoming_kind, idx_t incoming_order) {
 	os << indent;
 	if (!is_root) {
 		os << (is_last_child ? "└──" : "├──");
@@ -112,7 +85,9 @@ void PrintNodeRecursive(const OJTNode &node, std::ostringstream &os, const strin
 	}
 }
 
-} // namespace
+// ============================================================================
+// Printers
+// ============================================================================
 
 string OrderedJoinTree::Print() const {
 	std::ostringstream os;
@@ -123,10 +98,10 @@ string OrderedJoinTree::Print() const {
 	std::sort(nodes.begin(), nodes.end(),
 	          [](const OJTNode *a, const OJTNode *b) { return a->relation_id < b->relation_id; });
 
-	vector<EdgeRecord> edges;
+	vector<const OJTEdge *> edges;
 	CollectEdges(r, edges);
 	std::sort(edges.begin(), edges.end(),
-	          [](const EdgeRecord &a, const EdgeRecord &b) { return a.order < b.order; });
+	          [](const OJTEdge *a, const OJTEdge *b) { return a->order < b->order; });
 
 	os << "OJT: " << nodes.size() << " relations, " << edges.size() << " joins\n";
 	os << "root: R" << r.relation_id << "\n";
@@ -139,9 +114,9 @@ string OrderedJoinTree::Print() const {
 		os << "\n";
 	}
 	os << "edges (parent --KIND/order--> child):\n";
-	for (auto &e : edges) {
-		os << "  R" << e.parent_id << " --" << EnumUtil::ToString(e.kind) << "/" << e.order
-		   << "--> R" << e.child_id << "\n";
+	for (auto *e : edges) {
+		os << "  R" << e->parent_relation_id << " --" << EnumUtil::ToString(e->kind) << "/" << e->order
+		   << "--> R" << e->child->relation_id << "\n";
 	}
 	return os.str();
 }
@@ -152,7 +127,7 @@ string OrderedJoinTree::PrintAsTree() const {
 
 	vector<const OJTNode *> nodes;
 	CollectNodes(r, nodes);
-	vector<EdgeRecord> edges;
+	vector<const OJTEdge *> edges;
 	CollectEdges(r, edges);
 	os << "OJT (" << nodes.size() << " relations, " << edges.size() << " joins)\n";
 	PrintNodeRecursive(r, os, /*indent*/ "", /*is_last_child*/ true, /*is_root*/ true,

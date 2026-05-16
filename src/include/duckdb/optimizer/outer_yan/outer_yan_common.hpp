@@ -18,6 +18,7 @@
 #include "duckdb/common/vector.hpp"
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/planner/logical_operator.hpp"
 
 namespace duckdb {
 class LogicalAggregate;
@@ -25,6 +26,42 @@ class LogicalAggregate;
 //! OT/OJT base-relation identifier; centralised here so both the
 //! applicability gate and OperatorTree/OrderedJoinTree share the same alias.
 using RelationId = idx_t;
+
+//! A "base-relation subtree" as understood by OuterYan: LogicalGet /
+//! LogicalDummyScan / LogicalExpressionGet, possibly wrapped in a chain of
+//! single-child LogicalFilter / LogicalProjection. Shared across OuterYan's
+//! translation units.
+inline bool IsBaseRelationSubtree(const LogicalOperator &op) {
+	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_GET:
+	case LogicalOperatorType::LOGICAL_DUMMY_SCAN:
+	case LogicalOperatorType::LOGICAL_EXPRESSION_GET:
+		return true;
+	case LogicalOperatorType::LOGICAL_FILTER:
+	case LogicalOperatorType::LOGICAL_PROJECTION:
+		return op.children.size() == 1 && IsBaseRelationSubtree(*op.children[0]);
+	default:
+		return false;
+	}
+}
+
+//! Walk down through single-child LogicalFilter / LogicalProjection wrappers
+//! to find the underlying base operator. Returns the first non-wrapper
+//! operator (or the input itself if it isn't a wrapper); null in / null out.
+inline const LogicalOperator *FindBaseOp(const LogicalOperator *op) {
+	while (op) {
+		if (op->type == LogicalOperatorType::LOGICAL_FILTER ||
+		    op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			if (op->children.size() != 1 || !op->children[0]) {
+				break;
+			}
+			op = op->children[0].get();
+			continue;
+		}
+		break;
+	}
+	return op;
+}
 
 //! Edge / join classification, shared by OperatorTree and OrderedJoinTree.
 //! Aliased to DuckDB's `JoinType` since the two are semantically identical

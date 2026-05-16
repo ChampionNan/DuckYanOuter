@@ -24,27 +24,11 @@
 namespace duckdb {
 
 // ============================================================================
-// File-local helpers
+// BuildOT helpers
 // ============================================================================
 
-namespace {
-
-bool IsBaseRelationSubtree(const LogicalOperator &op) {
-	switch (op.type) {
-	case LogicalOperatorType::LOGICAL_GET:
-	case LogicalOperatorType::LOGICAL_DUMMY_SCAN:
-	case LogicalOperatorType::LOGICAL_EXPRESSION_GET:
-		return true;
-	case LogicalOperatorType::LOGICAL_FILTER:
-	case LogicalOperatorType::LOGICAL_PROJECTION:
-		return op.children.size() == 1 && IsBaseRelationSubtree(*op.children[0]);
-	default:
-		return false;
-	}
-}
-
-void MapTableToRelId(const LogicalOperator &op, idx_t relation_id,
-                     unordered_map<idx_t, RelationId> &table_to_relation) {
+void OuterYanTree::MapTableToRelId(const LogicalOperator &op, idx_t relation_id,
+                                   unordered_map<idx_t, RelationId> &table_to_relation) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
 		table_to_relation[get.table_index.index] = relation_id;
@@ -56,23 +40,24 @@ void MapTableToRelId(const LogicalOperator &op, idx_t relation_id,
 	}
 }
 
-void CollectReferencedRelations(const Expression &expr,
-                                const unordered_map<idx_t, RelationId> &table_to_relation,
-                                unordered_set<idx_t> &out) {
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-		auto &cref = expr.Cast<BoundColumnRefExpression>();
-		auto it = table_to_relation.find(cref.binding.table_index.index);
+void OuterYanTree::CollectReferencedRelations(const Expression &expr,
+                                              const unordered_map<idx_t, RelationId> &table_to_relation,
+                                              unordered_set<idx_t> &out) {
+	// Delegate the walk to the applicability gate's shared helper, then
+	// translate each raw `table_index` to its OT/OJT `RelationId`. Skips
+	// table_indexes that lie outside the join skeleton.
+	unordered_set<idx_t> tables;
+	OuterYanApplicability::CollectColumnTables(expr, tables);
+	for (auto ti : tables) {
+		auto it = table_to_relation.find(ti);
 		if (it != table_to_relation.end()) {
 			out.insert(it->second);
 		}
 	}
-	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
-		CollectReferencedRelations(child, table_to_relation, out);
-	});
 }
 
-optional<idx_t> LookupSingleRelation(const Expression &expr,
-                                     const unordered_map<idx_t, RelationId> &table_to_relation) {
+optional<idx_t> OuterYanTree::LookupSingleRelation(const Expression &expr,
+                                                   const unordered_map<idx_t, RelationId> &table_to_relation) {
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 		auto &cref = expr.Cast<BoundColumnRefExpression>();
 		auto it = table_to_relation.find(cref.binding.table_index.index);
@@ -91,7 +76,7 @@ optional<idx_t> LookupSingleRelation(const Expression &expr,
 }
 
 // TODO: Check
-bool CheckPKFK(LogicalOperator &op) {
+bool OuterYanTree::CheckPKFK(LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_FILTER ||
 	    op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		if (op.children.size() != 1) {
@@ -156,8 +141,6 @@ bool CheckPKFK(LogicalOperator &op) {
 	return false;
 }
 
-} // namespace
-
 // ============================================================================
 // CheckApplicability
 // ============================================================================
@@ -171,9 +154,7 @@ bool OuterYanTree::CheckApplicability(LogicalOperator &plan) {
 // BuildOT — Collect phase
 // ============================================================================
 
-namespace {
-
-class OTBuilder {
+class OuterYanTree::OTBuilder {
 public:
 	OTBuilder(LogicalOperator &plan_p, OuterYanTree &tree_p)
 	    : plan_root(plan_p), tree(tree_p) {
@@ -442,8 +423,6 @@ private:
 	}
 };
 
-} // namespace
-
 void OuterYanTree::BuildOT(unique_ptr<LogicalOperator> plan) {
 	if (!plan) {
 		throw InternalException("OuterYanTree::BuildOT: null plan");
@@ -457,20 +436,18 @@ void OuterYanTree::BuildOT(unique_ptr<LogicalOperator> plan) {
 // BuildOJT / ConstructOJT
 // ============================================================================
 
-namespace {
-
-//! Shared OJT-assembly body. Reads `tree.ot_relations_by_id` and
-//! `tree.ot_joins_by_order` (both populated by `BuildOT` and stable across
+//! Shared OJT-assembly body. Reads `ot_relations_by_id` and
+//! `ot_joins_by_order` (both populated by `BuildOT` and stable across
 //! Simplification / Desimplification join-kind mutations), returns a fresh
 //! OJT without persisting it. `BuildOJT` and `ConstructOJT` are thin
 //! wrappers that choose where to store the result.
-unique_ptr<OrderedJoinTree> BuildOJTImpl(OuterYanTree &tree) {
-	if (!tree.HasOT()) {
+unique_ptr<OrderedJoinTree> OuterYanTree::BuildOJTImpl() {
+	if (!HasOT()) {
 		throw InternalException("OuterYanTree::BuildOJTImpl: ot is null");
 	}
 
-	const auto &ot_relations = tree.ot_relations_by_id;
-	const auto &ot_joins = tree.ot_joins_by_order;
+	const auto &ot_relations = ot_relations_by_id;
+	const auto &ot_joins = ot_joins_by_order;
 
 	if (ot_relations.empty()) {
 		throw NotImplementedException("OuterYanTree::BuildOJTImpl: OT has no base relations");
@@ -597,27 +574,23 @@ unique_ptr<OrderedJoinTree> BuildOJTImpl(OuterYanTree &tree) {
 	return make_uniq<OrderedJoinTree>(std::move(nodes_by_id[ojt_root_id]));
 }
 
-} // namespace
-
 void OuterYanTree::BuildOJT() {
-	ojt = BuildOJTImpl(*this);
+	ojt = BuildOJTImpl();
 }
 
 unique_ptr<OrderedJoinTree> OuterYanTree::ConstructOJT() {
-	return BuildOJTImpl(*this);
+	return BuildOJTImpl();
 }
 
 // ============================================================================
 // OJTToLogicalPlan
 // ============================================================================
 
-namespace {
-
 //! Flatten the OJT into a vector of edge pointers ordered by post-order
 //! traversal; sorted later by `OJTEdge::order` so OJTToLogicalPlan emits
 //! deepest joins first.
-void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
-                    vector<OJTEdge *> &edges) {
+void OuterYanTree::CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
+                                  vector<OJTEdge *> &edges) {
 	if (node.relation_id >= nodes_by_rel.size()) {
 		nodes_by_rel.resize(node.relation_id + 1, nullptr);
 	}
@@ -634,8 +607,8 @@ void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
 	}
 }
 
-void PushFiltersAboveLeaf(unique_ptr<LogicalOperator> &subplan,
-                          vector<unique_ptr<Expression>> filters) {
+void OuterYanTree::PushFiltersAboveLeaf(unique_ptr<LogicalOperator> &subplan,
+                                        vector<unique_ptr<Expression>> filters) {
 	if (filters.empty()) {
 		return;
 	}
@@ -659,7 +632,7 @@ void PushFiltersAboveLeaf(unique_ptr<LogicalOperator> &subplan,
 	cur->children[0] = std::move(new_filter);
 }
 
-void TryPushFilter(unique_ptr<LogicalOperator> &subplan, unique_ptr<Expression> expr) {
+void OuterYanTree::TryPushFilter(unique_ptr<LogicalOperator> &subplan, unique_ptr<Expression> expr) {
 	if (subplan->type == LogicalOperatorType::LOGICAL_FILTER) {
 		subplan->Cast<LogicalFilter>().expressions.push_back(std::move(expr));
 		return;
@@ -670,10 +643,10 @@ void TryPushFilter(unique_ptr<LogicalOperator> &subplan, unique_ptr<Expression> 
 	subplan = std::move(wrap);
 }
 
-unique_ptr<LogicalOperator> BuildJoinFromEdge(const OJTEdge &edge,
-                                              const JoinRelationSet &parent_set,
-                                              unique_ptr<LogicalOperator> parent_plan,
-                                              unique_ptr<LogicalOperator> child_plan) {
+unique_ptr<LogicalOperator> OuterYanTree::BuildJoinFromEdge(const OJTEdge &edge,
+                                                            const JoinRelationSet &parent_set,
+                                                            unique_ptr<LogicalOperator> parent_plan,
+                                                            unique_ptr<LogicalOperator> child_plan) {
 	D_ASSERT(edge.info);
 	const auto &info = *edge.info;
 
@@ -702,8 +675,6 @@ unique_ptr<LogicalOperator> BuildJoinFromEdge(const OJTEdge &edge,
 	new_join->ResolveOperatorTypes();
 	return new_join;
 }
-
-} // namespace
 
 unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &context) {
 	if (!ojt) {

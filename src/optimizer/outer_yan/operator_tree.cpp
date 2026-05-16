@@ -12,33 +12,10 @@
 namespace duckdb {
 
 // ============================================================================
-// File-local helpers
+// OperatorTree — base-relation / expression introspection helpers
 // ============================================================================
 
-namespace {
-
-//! A "leaf" base-relation subtree from the OT's perspective: a LogicalGet,
-//! possibly under a chain of single-child LogicalFilter / LogicalProjection.
-//! Duplicated in tree_conversions.cpp; kept here so OperatorTreeIsValid is
-//! independent of the conversion translation unit.
-bool IsBaseRelationSubtree(const LogicalOperator &op) {
-	switch (op.type) {
-	case LogicalOperatorType::LOGICAL_GET:
-	case LogicalOperatorType::LOGICAL_DUMMY_SCAN:
-	case LogicalOperatorType::LOGICAL_EXPRESSION_GET:
-		return true;
-	case LogicalOperatorType::LOGICAL_FILTER:
-	case LogicalOperatorType::LOGICAL_PROJECTION:
-		return op.children.size() == 1 && IsBaseRelationSubtree(*op.children[0]);
-	default:
-		return false;
-	}
-}
-
-//! Extract the underlying LogicalGet's `table_index` from a base-relation
-//! subtree (LogicalGet possibly under single-child LogicalFilter /
-//! LogicalProjection). Returns empty for other shapes.
-optional<idx_t> BaseRelationTableIndex(const LogicalOperator &op) {
+optional<idx_t> OperatorTree::BaseRelationTableIndex(const LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		return op.Cast<LogicalGet>().table_index.index;
 	}
@@ -50,9 +27,24 @@ optional<idx_t> BaseRelationTableIndex(const LogicalOperator &op) {
 	return optional<idx_t>();
 }
 
-//! Locate a RELATION OTNode in `subtree_root` whose `origin` exposes
-//! `table_index`. Returns its `relation_id`, or `INVALID_INDEX` if absent.
-idx_t LookupRelationByTableIndex(const OTNode &subtree_root, idx_t table_index) {
+optional<idx_t> OperatorTree::SingleColumnRefTableIndex(const Expression &expr) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		return expr.Cast<BoundColumnRefExpression>().binding.table_index.index;
+	}
+	optional<idx_t> result;
+	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+		if (!result) {
+			result = SingleColumnRefTableIndex(child);
+		}
+	});
+	return result;
+}
+
+// ============================================================================
+// OperatorTree — IsValid sub-checks
+// ============================================================================
+
+idx_t OperatorTree::LookupRelationByTableIndex(const OTNode &subtree_root, idx_t table_index) {
 	if (subtree_root.kind == OTNode::Kind::RELATION) {
 		auto ti = BaseRelationTableIndex(*subtree_root.origin);
 		if (ti && *ti == table_index) {
@@ -71,23 +63,7 @@ idx_t LookupRelationByTableIndex(const OTNode &subtree_root, idx_t table_index) 
 	return DConstants::INVALID_INDEX;
 }
 
-//! First BoundColumnRefExpression encountered in a join-condition side. The
-//! applicability gate restricts conditions to two-relation equi/theta forms,
-//! so there is exactly one column ref per side.
-optional<idx_t> SingleColumnRefTableIndex(const Expression &expr) {
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
-		return expr.Cast<BoundColumnRefExpression>().binding.table_index.index;
-	}
-	optional<idx_t> result;
-	ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
-		if (!result) {
-			result = SingleColumnRefTableIndex(child);
-		}
-	});
-	return result;
-}
-
-bool CheckShape(const OTNode &node, string *reason) {
+bool OperatorTree::CheckShape(const OTNode &node, string *reason) {
 	if (node.kind == OTNode::Kind::JOIN) {
 		if (!node.info) {
 			return Fail(reason, "JOIN OTNode has null info");
@@ -112,7 +88,7 @@ bool CheckShape(const OTNode &node, string *reason) {
 	return true;
 }
 
-void CollectRelationIds(const OTNode &node, vector<idx_t> &out) {
+void OperatorTree::CollectRelationIds(const OTNode &node, vector<idx_t> &out) {
 	if (node.kind == OTNode::Kind::RELATION) {
 		out.push_back(node.relation_id);
 		return;
@@ -125,9 +101,9 @@ void CollectRelationIds(const OTNode &node, vector<idx_t> &out) {
 	}
 }
 
-bool CheckRelationIdsUnique(const OperatorTree &ot, string *reason) {
+bool OperatorTree::CheckRelationIdsUnique(const OTNode &root, string *reason) {
 	vector<idx_t> ids;
-	CollectRelationIds(ot.Root(), ids);
+	CollectRelationIds(root, ids);
 	unordered_set<idx_t> seen;
 	for (auto rid : ids) {
 		if (!seen.insert(rid).second) {
@@ -139,7 +115,7 @@ bool CheckRelationIdsUnique(const OperatorTree &ot, string *reason) {
 
 //! Recompute the subtree-relation union from scratch and compare against the
 //! cached set on every node. Returns the recomputed union via `out`.
-bool CheckSubtreeRelations(const OTNode &node, unordered_set<idx_t> &out, string *reason) {
+bool OperatorTree::CheckSubtreeRelations(const OTNode &node, unordered_set<idx_t> &out, string *reason) {
 	unordered_set<idx_t> expected;
 	if (node.kind == OTNode::Kind::RELATION) {
 		expected.insert(node.relation_id);
@@ -171,7 +147,7 @@ bool CheckSubtreeRelations(const OTNode &node, unordered_set<idx_t> &out, string
 //! Per-JOIN canonical-form assertion: condition LHS must resolve to
 //! `info->cond_left_relation_id` inside `children[0]` (and that relation lies
 //! in `children[0]->subtree_relations`); same for RHS / right.
-bool CheckJoinConditionAlignment(const OTNode &node, string *reason) {
+bool OperatorTree::CheckJoinConditionAlignment(const OTNode &node, string *reason) {
 	if (node.kind != OTNode::Kind::JOIN) {
 		return true;
 	}
@@ -227,7 +203,7 @@ bool CheckJoinConditionAlignment(const OTNode &node, string *reason) {
 }
 
 //! Common-relation rule between every (parent_join, child_join) pair.
-bool CheckCommonRelations(const OTNode &node, string *reason) {
+bool OperatorTree::CheckCommonRelations(const OTNode &node, string *reason) {
 	if (node.kind != OTNode::Kind::JOIN) {
 		return true;
 	}
@@ -251,9 +227,11 @@ bool CheckCommonRelations(const OTNode &node, string *reason) {
 	       CheckCommonRelations(*node.children[1], reason);
 }
 
-// --- Finalize helpers (used by BuildOT to enforce canonical form) ---
+// ============================================================================
+// OperatorTree — Finalize sub-steps
+// ============================================================================
 
-void PopulateSubtreeRelations(OTNode &node) {
+void OperatorTree::PopulateSubtreeRelations(OTNode &node) {
 	node.subtree_relations.clear();
 	if (node.kind == OTNode::Kind::RELATION) {
 		node.subtree_relations.insert(node.relation_id);
@@ -267,7 +245,7 @@ void PopulateSubtreeRelations(OTNode &node) {
 	                              node.children[1]->subtree_relations.end());
 }
 
-void CanonicaliseConditions(OTNode &node) {
+void OperatorTree::CanonicaliseConditions(OTNode &node) {
 	if (node.kind == OTNode::Kind::RELATION) {
 		return;
 	}
@@ -300,7 +278,9 @@ void CanonicaliseConditions(OTNode &node) {
 	CanonicaliseConditions(*node.children[1]);
 }
 
-} // namespace
+// ============================================================================
+// OperatorTree — public entry points
+// ============================================================================
 
 void OperatorTree::Finalize() {
 	if (!root) {
@@ -317,7 +297,7 @@ bool OperatorTree::IsValid(string *reason) const {
 	if (!CheckShape(*root, reason)) {
 		return false;
 	}
-	if (!CheckRelationIdsUnique(*this, reason)) {
+	if (!CheckRelationIdsUnique(*root, reason)) {
 		return false;
 	}
 	unordered_set<idx_t> recomputed;

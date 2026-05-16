@@ -65,6 +65,11 @@ public:
 
 	void VisitOperator(LogicalOperator &op) override;
 
+	//! Collect table_index values of all BoundColumnRefs reachable from `expr`.
+	//! Shared with `OuterYanTree::CollectReferencedRelations`, which adds a
+	//! translation step through `table_to_relation` to produce RelationIds.
+	static void CollectColumnTables(const Expression &expr, unordered_set<idx_t> &tables);
+
 private:
 	void VisitComparisonJoin(LogicalComparisonJoin &join);
 	void RegisterLeaf(LogicalOperator &leaf);
@@ -77,9 +82,6 @@ private:
 	// Union-find helpers for graph-cycle detection.
 	RelationId Find(RelationId x);
 	bool UnionRelations(RelationId a, RelationId b);
-
-	// Collect table_index values of all BoundColumnRefs reachable from `expr`.
-	static void CollectColumnTables(const Expression &expr, unordered_set<idx_t> &tables);
 
 private:
 	ApplicabilityResult result;

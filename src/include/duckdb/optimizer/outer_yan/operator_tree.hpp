@@ -155,6 +155,32 @@ public:
 	//! On failure, writes a diagnostic into *reason (if non-null) and
 	//! returns false; caller decides whether to throw.
 	bool IsValid(string *reason = nullptr) const;
+
+private:
+	// Finalize sub-steps.
+	static void PopulateSubtreeRelations(OTNode &node);
+	static void CanonicaliseConditions(OTNode &node);
+
+	// IsValid sub-checks.
+	static bool CheckShape(const OTNode &node, string *reason);
+	static void CollectRelationIds(const OTNode &node, vector<idx_t> &out);
+	static bool CheckRelationIdsUnique(const OTNode &root, string *reason);
+	static bool CheckSubtreeRelations(const OTNode &node, unordered_set<idx_t> &out, string *reason);
+	static bool CheckJoinConditionAlignment(const OTNode &node, string *reason);
+	static bool CheckCommonRelations(const OTNode &node, string *reason);
+
+	// Helper used by CheckJoinConditionAlignment to resolve a column's
+	// RELATION-OTNode within a subtree by its underlying LogicalGet table_index.
+	static idx_t LookupRelationByTableIndex(const OTNode &subtree_root, idx_t table_index);
+
+	// Extract the underlying LogicalGet's table_index from a base-relation
+	// subtree. Returns empty for non-base-relation shapes.
+	static optional<idx_t> BaseRelationTableIndex(const LogicalOperator &op);
+
+	// First BoundColumnRefExpression encountered in a join-condition side.
+	// The applicability gate restricts conditions to two-relation equi/theta
+	// forms, so there is exactly one column ref per side.
+	static optional<idx_t> SingleColumnRefTableIndex(const Expression &expr);
 };
 
 //! For inspecting an OT, convert to OJT via `OTToOJT` and use `PrintOJT` /
