@@ -58,6 +58,11 @@ struct OJTEdge {
 	//! root join (`order = n`). Derived from a post-order walk of the
 	//! original plan during `LogicalPlanToOJT`. 0 means uninitialised.
 	idx_t order = 0;
+	//! `relation_id` of the OJTNode that owns this edge. Set in BuildOJT
+	//! when the edge is attached to its parent; lets OJTToLogicalPlan
+	//! flatten edges into an order-sorted vector without losing the
+	//! parent-child link.
+	idx_t parent_relation_id = DConstants::INVALID_INDEX;
 	//! Owned join metadata (kind, original_kind, conditions,
 	//! cond_left/right_relation_id, distinct_count). Moved out of the
 	//! originating OT JOIN OTNode during BuildOJT. Replaces the prior

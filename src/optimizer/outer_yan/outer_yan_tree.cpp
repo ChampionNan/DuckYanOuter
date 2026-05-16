@@ -90,6 +90,7 @@ optional<idx_t> LookupSingleRelation(const Expression &expr,
 	return result;
 }
 
+// TODO: Check
 bool CheckPKFK(LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_FILTER ||
 	    op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
@@ -579,6 +580,7 @@ unique_ptr<OrderedJoinTree> BuildOJTImpl(OuterYanTree &tree) {
 		edge.original_kind =
 		    CheckOuterYanJoinFlip(ot_info.original_join_kind, parent_is_left);
 		edge.order = ot_join->order;
+		edge.parent_relation_id = parent_id;
 		// Move owned join metadata into the OJT edge; OT JOIN's `info` is null
 		// from here on and OT is not consulted after BuildOJT.
 		edge.info = std::move(ot_join->info);
@@ -611,17 +613,11 @@ unique_ptr<OrderedJoinTree> OuterYanTree::ConstructOJT() {
 
 namespace {
 
-struct EdgeBuildInfo {
-	idx_t parent_rel;
-	idx_t child_rel;
-	OuterYanJoinKind kind;
-	idx_t order;
-	//! Non-owning view into OJTEdge::info; lifetime matches the OJT.
-	OTJoin *join_info;
-};
-
+//! Flatten the OJT into a vector of edge pointers ordered by post-order
+//! traversal; sorted later by `OJTEdge::order` so OJTToLogicalPlan emits
+//! deepest joins first.
 void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
-                    vector<EdgeBuildInfo> &edges) {
+                    vector<OJTEdge *> &edges) {
 	if (node.relation_id >= nodes_by_rel.size()) {
 		nodes_by_rel.resize(node.relation_id + 1, nullptr);
 	}
@@ -633,13 +629,7 @@ void CollectOJTInfo(OJTNode &node, vector<OJTNode *> &nodes_by_rel,
 		if (!edge.info) {
 			throw InternalException("OJTToLogicalPlan: edge has no OTJoin info");
 		}
-		EdgeBuildInfo info;
-		info.parent_rel = node.relation_id;
-		info.child_rel = edge.child->relation_id;
-		info.kind = edge.kind;
-		info.order = edge.order;
-		info.join_info = edge.info.get();
-		edges.push_back(info);
+		edges.push_back(&edge);
 		CollectOJTInfo(*edge.child, nodes_by_rel, edges);
 	}
 }
@@ -680,12 +670,12 @@ void TryPushFilter(unique_ptr<LogicalOperator> &subplan, unique_ptr<Expression> 
 	subplan = std::move(wrap);
 }
 
-unique_ptr<LogicalOperator> BuildJoinFromEdge(const EdgeBuildInfo &edge,
+unique_ptr<LogicalOperator> BuildJoinFromEdge(const OJTEdge &edge,
                                               const JoinRelationSet &parent_set,
                                               unique_ptr<LogicalOperator> parent_plan,
                                               unique_ptr<LogicalOperator> child_plan) {
-	D_ASSERT(edge.join_info);
-	const auto &info = *edge.join_info;
+	D_ASSERT(edge.info);
+	const auto &info = *edge.info;
 
 	// Orientation: conditions[i].left is bound to info.cond_left_relation_id.
 	// If the parent subtree contains that relation, the conditions already
@@ -722,7 +712,7 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 	auto &ojt_ref = *ojt;
 
 	vector<OJTNode *> nodes_by_rel;
-	vector<EdgeBuildInfo> edges;
+	vector<OJTEdge *> edges;
 	CollectOJTInfo(ojt_ref.Root(), nodes_by_rel, edges);
 	const idx_t n_rels = nodes_by_rel.size();
 	if (n_rels == 0) {
@@ -767,11 +757,11 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 	}
 
 	std::sort(edges.begin(), edges.end(),
-	          [](const EdgeBuildInfo &a, const EdgeBuildInfo &b) { return a.order < b.order; });
+	          [](const OJTEdge *a, const OJTEdge *b) { return a->order < b->order; });
 
-	for (auto &e : edges) {
-		auto &parent_set = current_set_by_rel[e.parent_rel].get();
-		auto &child_set = current_set_by_rel[e.child_rel].get();
+	for (auto *e : edges) {
+		auto &parent_set = current_set_by_rel[e->parent_relation_id].get();
+		auto &child_set = current_set_by_rel[e->child->relation_id].get();
 		if (&parent_set == &child_set) {
 			throw InternalException(
 			    "OuterYanTree::OJTToLogicalPlan: edge endpoints already in the same group "
@@ -789,7 +779,7 @@ unique_ptr<LogicalOperator> OuterYanTree::OJTToLogicalPlan(ClientContext &contex
 		subplan_memo.erase(parent_it);
 		subplan_memo.erase(child_it);
 
-		auto new_join = BuildJoinFromEdge(e, parent_set, std::move(parent_plan), std::move(child_plan));
+		auto new_join = BuildJoinFromEdge(*e, parent_set, std::move(parent_plan), std::move(child_plan));
 		auto &merged = set_manager.Union(parent_set, child_set);
 
 		for (idx_t i = 0; i < parent_set.count; i++) {
