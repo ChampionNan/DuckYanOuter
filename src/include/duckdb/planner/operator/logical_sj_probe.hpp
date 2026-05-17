@@ -9,7 +9,7 @@
 #pragma once
 
 #include "duckdb/common/shared_ptr.hpp"
-#include "duckdb/optimizer/outer_yan/hash_filter.hpp"
+#include "duckdb/optimizer/outer_yan/semi_join_filter.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_sj_build.hpp"
 
@@ -17,8 +17,8 @@ namespace duckdb {
 
 //! LogicalSJProbe — OuterYan semi-join probe side.
 //!
-//! Pairing via shared HashFilter shared_ptrs (same instances held by the
-//! upstream LogicalSJBuild). Additionally tracks back-pointers to the
+//! Pairing via shared SemiJoinFilter shared_ptrs (same instances held by
+//! the upstream LogicalSJBuild). Additionally tracks back-pointers to the
 //! upstream LogicalSJBuild operators (`related_sj_build`) — used by the
 //! physical plan generator to wire pipeline dependencies, mirroring RPT's
 //! `LogicalUseBF::related_create_bf`.
@@ -29,14 +29,15 @@ public:
 	static constexpr const LogicalOperatorType TYPE = LogicalOperatorType::LOGICAL_SJ_PROBE;
 
 public:
-	explicit LogicalSJProbe(vector<shared_ptr<HashFilter>> sj_to_use);
+	explicit LogicalSJProbe(vector<shared_ptr<SemiJoinFilter>> sj_to_use);
 
 	//! Filters this operator probes against. Same shared_ptr instances are
 	//! populated by the paired LogicalSJBuild operators.
-	vector<shared_ptr<HashFilter>> sj_to_use;
+	vector<shared_ptr<SemiJoinFilter>> sj_to_use;
 
 	//! Back-pointers to the upstream LogicalSJBuild operators populating the
-	//! filters in `sj_to_use`. Mirrors RPT's `related_create_bf`.
+	//! filters in `sj_to_use`. Index-aligned with `sj_to_use`: entry i here
+	//! is the build for filter i there. Mirrors RPT's `related_create_bf`.
 	vector<LogicalSJBuild *> related_sj_build;
 
 public:
@@ -46,7 +47,8 @@ public:
 	idx_t EstimateCardinality(ClientContext &context) override;
 	vector<ColumnBinding> GetColumnBindings() override;
 
-	//! Append an upstream LogicalSJBuild that populates one of `sj_to_use`'s filters.
+	//! Append an upstream LogicalSJBuild that populates one of `sj_to_use`'s
+	//! filters. Caller must keep the index alignment with `sj_to_use`.
 	void AddDownStreamOperator(LogicalSJBuild *op);
 
 protected:

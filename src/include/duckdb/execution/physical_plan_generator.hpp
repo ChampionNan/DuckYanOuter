@@ -153,6 +153,16 @@ protected:
 	PhysicalOperator &CreatePlan(LogicalCTERef &op);
 	PhysicalOperator &CreatePlan(LogicalPivot &op);
 
+	// OuterYan — semi-join build / probe (plan 3). The Build's CreatePlan
+	// caches the produced PhysicalSJBuild on LogicalSJBuild::physical so
+	// multiple Probes referencing the same Build share one physical sink.
+	// `CreatePlanFromRelated` is invoked from the Probe's CreatePlan when
+	// resolving `LogicalSJProbe::related_sj_build` entries — it constructs
+	// the PhysicalSJBuild lazily if it doesn't already exist.
+	PhysicalOperator &CreatePlan(class LogicalSJBuild &op);
+	PhysicalOperator &CreatePlan(class LogicalSJProbe &op);
+	class PhysicalSJBuild *CreatePlanFromRelated(class LogicalSJBuild &op);
+
 	PhysicalOperator &PlanAsOfJoin(LogicalComparisonJoin &op);
 	PhysicalOperator &PlanComparisonJoin(LogicalComparisonJoin &op);
 	PhysicalOperator &PlanDelimJoin(LogicalComparisonJoin &op);

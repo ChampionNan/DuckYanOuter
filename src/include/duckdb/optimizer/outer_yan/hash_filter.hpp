@@ -8,124 +8,124 @@
 
 #pragma once
 
-#include "duckdb/common/atomic.hpp"
-#include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
-#include "duckdb/common/types/vector.hpp"
-#include "duckdb/common/unique_ptr.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/planner/column_binding.hpp"
 
 namespace duckdb {
 
-class BufferManager;
-
 // =============================================================================
-// HashTable — open-addressed backing store
+// HashFilter — exact set-membership fallback when KeyBitmap doesn't apply
 // =============================================================================
 //
-// Mirrors the API surface of RPT's `HashTable` (`Build`, `Merge`, `Probe`,
-// `ScanStructure`) but is a fresh implementation:
+// Used as the HASH branch of SemiJoinFilter when:
+//   - The build key type is not bitmap-eligible (varchar, decimal, etc.)
+//   - The key range exceeds PRAGMA outer_yan_bitmap_max_bytes * 8
+//   - Composite build keys (v1: bitmap only supports single-column)
 //
-//   - MurmurHash for key hashing
-//   - Linear probing open addressing for cache-friendly lookups
-//   - SIMD-batched probing in the hot loop (see HashFilterUseKernel below);
-//     scalar fallback per CLAUDE.md §2.3
+// Design — open-addressed hash set with linear probing, MurmurHash64A on
+// the concatenation of per-column Value::Hash() outputs. Inspired by Apache
+// Arrow Acero's `SwissTable`/`KeyEncoder` and DuckDB's `JoinHashTable` but
+// pared down to exact set-membership (no rowstore, no projection, no probe
+// scan structure). Slot layout:
 //
-// No false positives — semi-join reduction here must be exact.
-class HashTable {
-public:
-	struct ScanStructure {
-		Vector pointers;
-		idx_t count = 0;
-		SelectionVector sel_vector;
-		HashTable &ht;
-		bool finished = false;
-
-		explicit ScanStructure(HashTable &ht);
-		void Next(DataChunk &keys, SelectionVector &match_sel, idx_t &result_count);
-	};
-
-public:
-	HashTable(BufferManager &buffer_manager, vector<LogicalType> condition_types);
-	~HashTable();
-
-	void Build(DataChunk &keys);
-	void Merge(HashTable &other);
-	void Finalize();
-
-	unique_ptr<ScanStructure> Probe(DataChunk &keys);
-
-	idx_t Count() const;
-
-private:
-	BufferManager &buffer_manager;
-	vector<LogicalType> condition_types;
-};
-
-// =============================================================================
-// HashFilter — shared runtime carrier for an SJBuild / SJProbe pair
-// =============================================================================
+//     Slot { hash_t full_hash; idx_t key_index_or_EMPTY; }
 //
-// Both sides of the pair — `LogicalSJBuild::sj_to_create` and
-// `LogicalSJProbe::sj_to_use` — hold `vector<shared_ptr<HashFilter>>`
-// pointing to the same instances. The shared object IS the binding; no
-// separate registry / handle id is needed.
+// `slots_` is a power-of-2 array (probed via `hash & mask_`). Stored keys
+// live in `stored_keys_` (one vector<Value> per unique build tuple).
+// Collisions follow linear probing — `(idx + 1) & mask_` — chosen for
+// cache friendliness over double hashing.
 //
-// Hash filter (not bloom filter) — semi-join reduction here must be exact,
-// so we use a hash-based set with no false-positive rate.
+// Concurrency model: each thread builds a thread-local HashFilter, all of
+// which are folded into the global one at Combine/Finalize via Merge. So
+// neither Build nor Contains needs internal synchronisation. Merge is
+// single-threaded by construction (called once at Finalize).
 //
-// Column-binding metadata for the build and probe sides is stored on the
-// filter itself, matching RPT's pattern.
+// Exact semantics: no false positives. NULL keys are skipped at Build time
+// and at probe time (semi-join NULL never matches).
 class HashFilter {
 public:
 	HashFilter();
+	~HashFilter();
 
-	void AddColumnBindingBuilt(ColumnBinding binding);
-	void AddColumnBindingApplied(ColumnBinding binding);
+	// Extract the build-side join keys from `chunk` and insert them. NULL
+	// keys are skipped. Idempotent: the table is a set (duplicate inserts
+	// are no-ops).
+	void Build(const DataChunk &chunk, const vector<idx_t> &build_col_ids);
 
-	const vector<ColumnBinding> &GetColumnBindingsBuilt() const {
-		return column_bindings_built;
+	// Move all keys from `other` into this; `other` becomes empty. Used to
+	// fold per-thread HashFilters into the global one. Single-threaded.
+	void Merge(HashFilter &other);
+
+	// Marks the filter probe-ready. Currently just a flag; reserved for
+	// future repack / shrink-to-fit optimisations.
+	void Finalize();
+
+	// Per-row existence test. Single-key probe; called by HashFilterUseKernel.
+	bool Contains(const vector<Value> &key) const;
+
+	idx_t Count() const {
+		return count_;
 	}
-	const vector<ColumnBinding> &GetColumnBindingsApplied() const {
-		return column_bindings_applied;
+	idx_t Capacity() const {
+		return mask_ + 1;
+	}
+	bool IsEmpty() const {
+		return count_ == 0;
+	}
+	bool IsFinalized() const {
+		return finalized_;
 	}
 
-	bool IsEmpty() const;
-	bool IsUsed() const {
-		return used.load();
-	}
-	void SetUsed() {
-		used.store(true);
-	}
-
-	//! The underlying open-addressed table (MurmurHash + linear probing).
-	shared_ptr<HashTable> hash_table;
+	// Reference-quality MurmurHash64A (Austin Appleby). Public so callers
+	// can hash custom byte sequences with the same family used internally.
+	static hash_t MurmurHash64A(const void *data, idx_t len, uint64_t seed = 0);
+	// Combine per-column Value::Hash() outputs into one MurmurHash64A digest.
+	static hash_t HashKey(const vector<Value> &key);
 
 private:
-	vector<ColumnBinding> column_bindings_built;
-	vector<ColumnBinding> column_bindings_applied;
-	mutable atomic<bool> used;
+	struct Slot {
+		hash_t hash;
+		idx_t key_index; // EMPTY_KEY_INDEX when slot is free
+	};
+
+	static constexpr idx_t EMPTY_KEY_INDEX = NumericLimits<idx_t>::Maximum();
+	// Power-of-2 starting capacity. Small so that filters over tiny build
+	// sides don't waste memory on slot allocation.
+	static constexpr idx_t INITIAL_CAPACITY = 64;
+
+	// Load factor 3/4 — checked as (count+1)*4 > capacity*3 to avoid FP.
+	void EnsureCapacityFor(idx_t additional);
+	void Resize(idx_t new_capacity);
+	// Insert (or no-op on duplicate). Caller pre-computes `hash` to avoid
+	// re-hashing during Merge.
+	void InsertHashedKey(vector<Value> key, hash_t hash);
+	static bool KeysEqual(const vector<Value> &a, const vector<Value> &b);
+
+	vector<Slot> slots_;
+	idx_t mask_ = 0; // capacity - 1
+	vector<vector<Value>> stored_keys_;
+	idx_t count_ = 0;
+	bool finalized_ = false;
 };
 
 // =============================================================================
-// HashFilterUseKernel — SIMD-batched probe kernel
+// HashFilterUseKernel — per-chunk probe kernel
 // =============================================================================
 //
-// Mirrors RPT's `HashFilterUseKernel::filter`. Given a probe-side input, a
-// filter, and an output selection vector, narrows the selection to rows
-// whose keys hit the filter.
-//
-// SIMD-batched in the hot loop (target SSE4.2 baseline + AVX2 opportunistic
-// on x86-64; NEON on ARM64). Scalar fallback retained per CLAUDE.md §2.3.
-// The caller is responsible for checking that the filter is non-empty and
-// valid before invoking.
+// Per-row Contains check, walking `probe_col_ids` to extract each row's key
+// tuple. SIMD acceleration is plausible (batched MurmurHash + gather) but
+// deferred — KeyBitmap is the primary path in plan 3 and the HASH branch
+// is rarely hot.
 class HashFilterUseKernel {
 public:
-	static void filter(vector<Vector> &input, shared_ptr<HashFilter> hash_filter, SelectionVector &sel,
-	                   idx_t &approved_tuple_count, idx_t row_num);
+	//! Narrows `sel` in-place to surviving rows from `input`. `probe_col_ids`
+	//! identify the join-key columns in `input`. NULL probe keys never match.
+	static void filter(const DataChunk &input, const vector<idx_t> &probe_col_ids,
+	                   const HashFilter &hash_filter, SelectionVector &sel, idx_t &approved);
 };
 
 } // namespace duckdb

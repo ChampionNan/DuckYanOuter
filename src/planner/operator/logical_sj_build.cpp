@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-LogicalSJBuild::LogicalSJBuild(vector<shared_ptr<HashFilter>> sj_to_create_p)
+LogicalSJBuild::LogicalSJBuild(vector<shared_ptr<SemiJoinFilter>> sj_to_create_p)
     : LogicalOperator(LogicalOperatorType::LOGICAL_SJ_BUILD), sj_to_create(std::move(sj_to_create_p)) {
 }
 

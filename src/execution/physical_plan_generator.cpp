@@ -11,6 +11,8 @@
 #include "duckdb/planner/operator/list.hpp"
 #include "duckdb/execution/operator/helper/physical_verify_vector.hpp"
 #include "duckdb/main/settings.hpp"
+#include "duckdb/planner/operator/logical_sj_build.hpp"
+#include "duckdb/planner/operator/logical_sj_probe.hpp"
 
 namespace duckdb {
 
@@ -103,6 +105,10 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalOperator &op) {
 		return CreatePlan(op.Cast<LogicalComparisonJoin>());
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
 		return CreatePlan(op.Cast<LogicalCrossProduct>());
+	case LogicalOperatorType::LOGICAL_SJ_BUILD:
+		return CreatePlan(op.Cast<LogicalSJBuild>());
+	case LogicalOperatorType::LOGICAL_SJ_PROBE:
+		return CreatePlan(op.Cast<LogicalSJProbe>());
 	case LogicalOperatorType::LOGICAL_POSITIONAL_JOIN:
 		return CreatePlan(op.Cast<LogicalPositionalJoin>());
 	case LogicalOperatorType::LOGICAL_UNION:

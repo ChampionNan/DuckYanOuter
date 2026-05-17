@@ -6,7 +6,9 @@ add_library_unity(
   desimplification.cpp
   evaluation_order.cpp
   hash_filter.cpp
+  key_bitmap.cpp
   operator_tree.cpp
+  semi_join_filter.cpp
   ordered_join_tree.cpp
   outer_yan_dp.cpp
   outer_yan_post.cpp

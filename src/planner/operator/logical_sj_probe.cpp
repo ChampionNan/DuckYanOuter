@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-LogicalSJProbe::LogicalSJProbe(vector<shared_ptr<HashFilter>> sj_to_use_p)
+LogicalSJProbe::LogicalSJProbe(vector<shared_ptr<SemiJoinFilter>> sj_to_use_p)
     : LogicalOperator(LogicalOperatorType::LOGICAL_SJ_PROBE), sj_to_use(std::move(sj_to_use_p)) {
 }
 
