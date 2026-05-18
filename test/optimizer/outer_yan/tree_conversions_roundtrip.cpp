@@ -21,6 +21,17 @@ void Seed(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000)"));
 }
 
+//! Wider seed for 4..6 relation cases.
+void SeedWide(Connection &con) {
+	Seed(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE d(id INTEGER, dx INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE e(id INTEGER, ex INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE f(id INTEGER, fx INTEGER)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO d VALUES (2, 20000), (3, 30000), (5, 50000)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO e VALUES (1, 100000), (4, 400000), (5, 500000)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO f VALUES (3, 3000000), (5, 5000000), (6, 6000000)"));
+}
+
 //! Run `sql` through:
 //!   reference path: con.Query(sql) — full pipeline.
 //!   roundtrip path: con.ExtractPlan(sql) → LogicalPlanToOT → OTToOJT →
@@ -141,6 +152,109 @@ TEST_CASE("outer_yan tree_conversions: multi-relation residual filter roundtrip"
 	                            "INNER JOIN c ON b.id = c.id "
 	                            "WHERE a.ax + c.cx > 1010 "
 	                            "ORDER BY a.id, b.bx, c.cx");
+}
+
+TEST_CASE("outer_yan tree_conversions: 4-relation LEFT chain roundtrip",
+          "[outer_yan][tree_conversions]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedWide(con);
+	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx, d.dx "
+	                            "FROM a "
+	                            "LEFT JOIN b ON a.id = b.id "
+	                            "LEFT JOIN c ON a.id = c.id "
+	                            "LEFT JOIN d ON a.id = d.id "
+	                            "ORDER BY a.id, b.bx NULLS FIRST, c.cx NULLS FIRST, "
+	                            "         d.dx NULLS FIRST");
+}
+
+TEST_CASE("outer_yan tree_conversions: 5-relation LEFT chain stresses DP enumeration",
+          "[outer_yan][tree_conversions]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedWide(con);
+	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx, d.dx, e.ex "
+	                            "FROM a "
+	                            "LEFT JOIN b ON a.id = b.id "
+	                            "LEFT JOIN c ON a.id = c.id "
+	                            "LEFT JOIN d ON a.id = d.id "
+	                            "LEFT JOIN e ON a.id = e.id "
+	                            "ORDER BY a.id, b.bx NULLS FIRST, c.cx NULLS FIRST, "
+	                            "         d.dx NULLS FIRST, e.ex NULLS FIRST");
+}
+
+TEST_CASE("outer_yan tree_conversions: 6-relation LEFT star roundtrip",
+          "[outer_yan][tree_conversions]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedWide(con);
+	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx, d.dx, e.ex, f.fx "
+	                            "FROM a "
+	                            "LEFT JOIN b ON a.id = b.id "
+	                            "LEFT JOIN c ON a.id = c.id "
+	                            "LEFT JOIN d ON a.id = d.id "
+	                            "LEFT JOIN e ON a.id = e.id "
+	                            "LEFT JOIN f ON a.id = f.id "
+	                            "ORDER BY a.id, b.bx NULLS FIRST, c.cx NULLS FIRST, "
+	                            "         d.dx NULLS FIRST, e.ex NULLS FIRST, f.fx NULLS FIRST");
+}
+
+TEST_CASE("outer_yan tree_conversions: RIGHT-flip via OJT parent-orientation",
+          "[outer_yan][tree_conversions]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	Seed(con);
+	// `b RIGHT JOIN a` mirrors `a LEFT JOIN b`. After OJT construction the
+	// parent might be on the other side, forcing the rebuilt JoinType to
+	// flip RIGHT → LEFT (or vice versa). The roundtrip assertion catches a
+	// flip that loses NULL-padded rows.
+	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx "
+	                            "FROM b "
+	                            "RIGHT JOIN a ON a.id = b.id "
+	                            "LEFT JOIN c ON a.id = c.id "
+	                            "ORDER BY a.id, b.bx NULLS FIRST, c.cx NULLS FIRST");
+}
+
+TEST_CASE("outer_yan tree_conversions: FULL OUTER head + LEFT tail roundtrip",
+          "[outer_yan][tree_conversions]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	Seed(con);
+	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx "
+	                            "FROM a "
+	                            "FULL OUTER JOIN b ON a.id = b.id "
+	                            "LEFT JOIN c ON a.id = c.id "
+	                            "ORDER BY a.id NULLS FIRST, b.bx NULLS FIRST, c.cx NULLS FIRST");
+}
+
+TEST_CASE("outer_yan tree_conversions: residual filter across three relations",
+          "[outer_yan][tree_conversions]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	SeedWide(con);
+	// Filter references a, c, d — must land at the smallest fused subplan
+	// covering all three, not at the root.
+	AssertRoundtripMatches(con, "SELECT a.id, b.bx, c.cx, d.dx "
+	                            "FROM a "
+	                            "INNER JOIN b ON a.id = b.id "
+	                            "INNER JOIN c ON b.id = c.id "
+	                            "INNER JOIN d ON c.id = d.id "
+	                            "WHERE a.ax + c.cx + d.dx > 1010 "
+	                            "ORDER BY a.id, b.bx, c.cx, d.dx");
+}
+
+TEST_CASE("outer_yan tree_conversions: multi-condition equi-join roundtrip",
+          "[outer_yan][tree_conversions]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	Seed(con);
+	// Compound key on the (a, b) edge — both conditions are plain equi-joins
+	// on distinct column pairs; both must be preserved.
+	AssertRoundtripMatches(con,
+	    "SELECT a.id, b.bx, c.cx "
+	    "FROM a LEFT JOIN b ON a.id = b.id AND a.ax = b.bx / 10 "
+	    "       LEFT JOIN c ON a.id = c.id "
+	    "ORDER BY a.id, b.bx NULLS FIRST, c.cx NULLS FIRST");
 }
 
 // ============================================================================

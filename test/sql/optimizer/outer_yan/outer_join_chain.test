@@ -1,5 +1,509 @@
 # name: test/sql/optimizer/outer_yan/outer_join_chain.test
-# description: OuterYan optimizer — LEFT/RIGHT/FULL OUTER join chain reordering
+# description: OuterYan optimizer — outer-join chain semantics. Validates that
+#              NULL-padding behavior is preserved across the LEFT/RIGHT/FULL
+#              variants, residual filters, and chain lengths 3..5. Every block
+#              runs with OuterYan enabled and disabled; the row multisets must
+#              match exactly (including NULL counts).
 # group: [outer_yan]
 
-# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.
+statement ok
+PRAGMA enable_verification
+
+statement ok
+PRAGMA verify_parallelism
+
+statement ok
+CREATE TABLE a(id INTEGER, ax INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER, bx INTEGER);
+
+statement ok
+CREATE TABLE c(id INTEGER, cx INTEGER);
+
+statement ok
+CREATE TABLE d(id INTEGER, dx INTEGER);
+
+statement ok
+CREATE TABLE e(id INTEGER, ex INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20), (3, 30), (4, 40);
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300), (5, 500);
+
+statement ok
+INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
+
+statement ok
+INSERT INTO d VALUES (2, 20000), (3, 30000), (5, 50000);
+
+statement ok
+INSERT INTO e VALUES (1, 100000), (4, 400000), (5, 500000);
+
+# ============================================================================
+# Variant 1 — LEFT/LEFT chain (canonical case).
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 2 — RIGHT/RIGHT chain (covers the RIGHT_OUTER → LEFT_OUTER flip path
+# in tree_conversions.cpp::CheckOuterYanJoinFlip).
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+NULL	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+NULL	NULL	4000
+
+# ============================================================================
+# Variant 3 — Mixed LEFT/RIGHT (exercises Resimplification path).
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id RIGHT JOIN c ON a.id = c.id
+----
+1	100	1000
+3	300	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id RIGHT JOIN c ON a.id = c.id
+----
+1	100	1000
+3	300	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 4 — FULL OUTER at the head of the chain.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+NULL	500	NULL
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+NULL	500	NULL
+
+# ============================================================================
+# Variant 5 — FULL OUTER at the tail of the chain.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id FULL OUTER JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id FULL OUTER JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 6 — 4-relation chain.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query IIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON a.id = c.id
+     LEFT JOIN d ON a.id = d.id
+----
+1	100	1000	NULL
+2	200	NULL	20000
+3	300	3000	30000
+4	NULL	4000	NULL
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query IIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON a.id = c.id
+     LEFT JOIN d ON a.id = d.id
+----
+1	100	1000	NULL
+2	200	NULL	20000
+3	300	3000	30000
+4	NULL	4000	NULL
+
+# ============================================================================
+# Variant 7 — 5-relation star (one fact + 4 dim tables, all LEFT). Each dim
+# attaches to the same fact column → join graph is a star.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query IIIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx, e.ex
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON a.id = c.id
+     LEFT JOIN d ON a.id = d.id
+     LEFT JOIN e ON a.id = e.id
+----
+1	100	1000	NULL	100000
+2	200	NULL	20000	NULL
+3	300	3000	30000	NULL
+4	NULL	4000	NULL	400000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query IIIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx, e.ex
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON a.id = c.id
+     LEFT JOIN d ON a.id = d.id
+     LEFT JOIN e ON a.id = e.id
+----
+1	100	1000	NULL	100000
+2	200	NULL	20000	NULL
+3	300	3000	30000	NULL
+4	NULL	4000	NULL	400000
+
+# ============================================================================
+# Variant 8 — 5-relation chain (a → b → c → d → e via successive join keys).
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query IIIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx, e.ex
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON b.id = c.id
+     LEFT JOIN d ON c.id = d.id
+     LEFT JOIN e ON d.id = e.id
+----
+1	100	1000	NULL	NULL
+2	200	NULL	NULL	NULL
+3	300	3000	30000	NULL
+4	NULL	NULL	NULL	NULL
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query IIIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx, e.ex
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON b.id = c.id
+     LEFT JOIN d ON c.id = d.id
+     LEFT JOIN e ON d.id = e.id
+----
+1	100	1000	NULL	NULL
+2	200	NULL	NULL	NULL
+3	300	3000	30000	NULL
+4	NULL	NULL	NULL	NULL
+
+# ============================================================================
+# Variant 9 — Residual filter on a single relation.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+WHERE a.ax > 15
+----
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+WHERE a.ax > 15
+----
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 10 — Residual filter spanning two relations (must land at the
+# lowest fused subplan, not at the root). Exercises step 3 of OJTToLogicalPlan.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+WHERE COALESCE(b.bx, 0) + COALESCE(c.cx, 0) > 500
+----
+1	100	1000
+3	300	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+WHERE COALESCE(b.bx, 0) + COALESCE(c.cx, 0) > 500
+----
+1	100	1000
+3	300	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 11 — Residual filter that null-rejects an outer-joined column;
+# this would NORMALLY allow Simplification::Apply to convert LEFT→INNER.
+# Verify the conversion is semantics-preserving.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+WHERE b.bx > 50
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+WHERE b.bx > 50
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+
+# ============================================================================
+# Variant 12 — Multiple equi-join conditions on the same edge (compound key).
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id AND a.ax = b.bx / 10
+     LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id AND a.ax = b.bx / 10
+     LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 13 — Empty intermediate result. b has no row with id=99.
+# ============================================================================
+
+statement ok
+CREATE TABLE z(id INTEGER, zx INTEGER);
+
+statement ok
+INSERT INTO z VALUES (99, 9900);
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, z.zx, c.cx
+FROM a LEFT JOIN z ON a.id = z.id LEFT JOIN c ON a.id = c.id
+----
+1	NULL	1000
+2	NULL	NULL
+3	NULL	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, z.zx, c.cx
+FROM a LEFT JOIN z ON a.id = z.id LEFT JOIN c ON a.id = c.id
+----
+1	NULL	1000
+2	NULL	NULL
+3	NULL	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 14 — Build-side has NULL keys; NULL keys must never match.
+# ============================================================================
+
+statement ok
+CREATE TABLE bn(id INTEGER, bnx INTEGER);
+
+statement ok
+INSERT INTO bn VALUES (1, 11), (NULL, 22), (3, 33), (NULL, 44);
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, bn.bnx, c.cx
+FROM a LEFT JOIN bn ON a.id = bn.id LEFT JOIN c ON a.id = c.id
+----
+1	11	1000
+2	NULL	NULL
+3	33	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, bn.bnx, c.cx
+FROM a LEFT JOIN bn ON a.id = bn.id LEFT JOIN c ON a.id = c.id
+----
+1	11	1000
+2	NULL	NULL
+3	33	3000
+4	NULL	4000
+
+# ============================================================================
+# Variant 15 — Multi-row build side (many-to-one). Each b row joins each a row.
+# ============================================================================
+
+statement ok
+CREATE TABLE bm(id INTEGER, bmx INTEGER);
+
+statement ok
+INSERT INTO bm VALUES (1, 11), (1, 12), (1, 13), (2, 21), (3, 31);
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, bm.bmx, c.cx
+FROM a LEFT JOIN bm ON a.id = bm.id LEFT JOIN c ON a.id = c.id
+----
+1	11	1000
+1	12	1000
+1	13	1000
+2	21	NULL
+3	31	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, bm.bmx, c.cx
+FROM a LEFT JOIN bm ON a.id = bm.id LEFT JOIN c ON a.id = c.id
+----
+1	11	1000
+1	12	1000
+1	13	1000
+2	21	NULL
+3	31	3000
+4	NULL	4000
+
+statement ok
+SET disabled_optimizers TO ''

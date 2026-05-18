@@ -1,5 +1,208 @@
 # name: test/sql/optimizer/outer_yan/feature_flag.test
-# description: OuterYan optimizer — toggling the feature flag reverts to existing JOIN_ORDER behavior
+# description: OuterYan optimizer — toggling individual sub-passes through
+#              `SET disabled_optimizers` reverts the optimizer to baseline
+#              behavior. Verifies the three sub-pass names registered in
+#              src/common/enums/optimizer_type.cpp:52-54:
+#                outer_yan_pre   — applicability + LogicalPlanToOT + simplify
+#                outer_yan_dp    — DP enumeration
+#                outer_yan_post  — Resimplify + semi-join insertion
 # group: [outer_yan]
 
-# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.
+statement ok
+PRAGMA enable_verification
+
+statement ok
+PRAGMA verify_parallelism
+
+statement ok
+CREATE TABLE a(id INTEGER, ax INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER, bx INTEGER);
+
+statement ok
+CREATE TABLE c(id INTEGER, cx INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20), (3, 30), (4, 40);
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300);
+
+statement ok
+INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
+
+statement ok
+PRAGMA explain_output='optimized_only'
+
+# Canonical accepted query — 3-way LEFT chain.
+
+# ============================================================================
+# Default: all OuterYan passes enabled — SJ_PROBE present.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Disable outer_yan_pre alone — entire pipeline is short-circuited because
+# DP/Post check `outer_yan_active` (set inside Pre).
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Disable outer_yan_dp — Pre runs (applicability passes) but DP is skipped.
+# The OJT never gets built into a chosen ordering, so Post can't insert SJ.
+# Results identical; SJ_PROBE must NOT appear.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_dp'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Disable outer_yan_post — semi-join insertion is skipped. Pre/DP ran; the
+# join order may have been chosen, but no SJ ops appear in the rebuilt plan.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Disable all three at once — full revert to baseline JoinOrderOptimizer path.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Re-enable — confirm the toggle is fully reversible.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Coexists with baseline JOIN_ORDER for non-applicable queries.
+# Disabling just outer_yan_pre on a pure-INNER query leaves the same baseline.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+
+statement ok
+SET disabled_optimizers TO ''

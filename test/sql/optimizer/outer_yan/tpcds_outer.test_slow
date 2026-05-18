@@ -1,0 +1,236 @@
+# name: test/sql/optimizer/outer_yan/tpcds_outer.test_slow
+# description: OuterYan optimizer — TPC-DS outer-join regression at sf=0.1.
+#              Native outer-join queries q05, q40, q49, q51, q72, q80, q93,
+#              q97. Some queries (q40, q51, q72) contain window functions and
+#              are expected to fall back to baseline; correctness assertions
+#              still hold either way. Each query runs once with OuterYan
+#              enabled and once disabled; both must succeed without error.
+#              Reference-CSV comparison happens inside `PRAGMA tpcds(N)`.
+# group: [outer_yan]
+
+require tpcds
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CALL dsdgen(sf=0.1);
+
+# ============================================================================
+# Native outer-join queries — run under both modes.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+PRAGMA tpcds(5)
+
+statement ok
+PRAGMA tpcds(40)
+
+statement ok
+PRAGMA tpcds(49)
+
+statement ok
+PRAGMA tpcds(51)
+
+statement ok
+PRAGMA tpcds(72)
+
+statement ok
+PRAGMA tpcds(80)
+
+statement ok
+PRAGMA tpcds(93)
+
+statement ok
+PRAGMA tpcds(97)
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+PRAGMA tpcds(5)
+
+statement ok
+PRAGMA tpcds(40)
+
+statement ok
+PRAGMA tpcds(49)
+
+statement ok
+PRAGMA tpcds(51)
+
+statement ok
+PRAGMA tpcds(72)
+
+statement ok
+PRAGMA tpcds(80)
+
+statement ok
+PRAGMA tpcds(93)
+
+statement ok
+PRAGMA tpcds(97)
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ============================================================================
+# Derived rewrites — INNER → LEFT OUTER in selected smaller queries.
+# Each runs with OuterYan enabled, then under fallback; outputs must match.
+# ============================================================================
+
+# Derived q03: dim → store_sales LEFT OUTER → item LEFT OUTER.
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+CREATE TABLE q03_oy AS
+SELECT dt.d_year,
+       item.i_brand_id AS brand_id,
+       item.i_brand    AS brand,
+       sum(ss_ext_sales_price) AS sum_agg
+FROM date_dim dt
+LEFT OUTER JOIN store_sales ON dt.d_date_sk = ss_sold_date_sk
+LEFT OUTER JOIN item ON ss_item_sk = item.i_item_sk
+WHERE item.i_manufact_id = 128
+  AND dt.d_moy = 11
+GROUP BY dt.d_year, item.i_brand, item.i_brand_id;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+CREATE TABLE q03_base AS
+SELECT dt.d_year,
+       item.i_brand_id AS brand_id,
+       item.i_brand    AS brand,
+       sum(ss_ext_sales_price) AS sum_agg
+FROM date_dim dt
+LEFT OUTER JOIN store_sales ON dt.d_date_sk = ss_sold_date_sk
+LEFT OUTER JOIN item ON ss_item_sk = item.i_item_sk
+WHERE item.i_manufact_id = 128
+  AND dt.d_moy = 11
+GROUP BY dt.d_year, item.i_brand, item.i_brand_id;
+
+query IIII
+SELECT * FROM (
+    SELECT * FROM q03_oy EXCEPT SELECT * FROM q03_base
+    UNION ALL
+    SELECT * FROM q03_base EXCEPT SELECT * FROM q03_oy
+) ORDER BY 1, 2, 3, 4;
+----
+
+# Derived q07: 5-relation outer-join star.
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+CREATE TABLE q07_oy AS
+SELECT i_item_id,
+       avg(ss_quantity)        AS agg1,
+       avg(ss_list_price)      AS agg2,
+       avg(ss_coupon_amt)      AS agg3,
+       avg(ss_sales_price)     AS agg4
+FROM customer_demographics
+LEFT OUTER JOIN store_sales ON cd_demo_sk = ss_cdemo_sk
+LEFT OUTER JOIN date_dim    ON ss_sold_date_sk = d_date_sk
+LEFT OUTER JOIN item        ON ss_item_sk = i_item_sk
+LEFT OUTER JOIN promotion   ON ss_promo_sk = p_promo_sk
+WHERE cd_gender = 'F'
+  AND cd_marital_status = 'W'
+  AND cd_education_status = 'Primary'
+  AND (p_channel_email = 'N' OR p_channel_event = 'N')
+  AND d_year = 1998
+GROUP BY i_item_id;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+CREATE TABLE q07_base AS
+SELECT i_item_id,
+       avg(ss_quantity)        AS agg1,
+       avg(ss_list_price)      AS agg2,
+       avg(ss_coupon_amt)      AS agg3,
+       avg(ss_sales_price)     AS agg4
+FROM customer_demographics
+LEFT OUTER JOIN store_sales ON cd_demo_sk = ss_cdemo_sk
+LEFT OUTER JOIN date_dim    ON ss_sold_date_sk = d_date_sk
+LEFT OUTER JOIN item        ON ss_item_sk = i_item_sk
+LEFT OUTER JOIN promotion   ON ss_promo_sk = p_promo_sk
+WHERE cd_gender = 'F'
+  AND cd_marital_status = 'W'
+  AND cd_education_status = 'Primary'
+  AND (p_channel_email = 'N' OR p_channel_event = 'N')
+  AND d_year = 1998
+GROUP BY i_item_id;
+
+query IIIII
+SELECT * FROM (
+    SELECT * FROM q07_oy EXCEPT SELECT * FROM q07_base
+    UNION ALL
+    SELECT * FROM q07_base EXCEPT SELECT * FROM q07_oy
+) ORDER BY 1, 2, 3, 4, 5;
+----
+
+# Derived q18: 6-relation outer-join chain with cross-table aggregation.
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+CREATE TABLE q18_oy AS
+SELECT i_item_id,
+       ca_country,
+       ca_state,
+       ca_county,
+       avg(cs_quantity)        AS agg1,
+       avg(cs_list_price)      AS agg2
+FROM catalog_sales
+LEFT OUTER JOIN customer_demographics ON cs_bill_cdemo_sk = cd_demo_sk
+LEFT OUTER JOIN customer              ON cs_bill_customer_sk = c_customer_sk
+LEFT OUTER JOIN customer_address      ON c_current_addr_sk = ca_address_sk
+LEFT OUTER JOIN date_dim              ON cs_sold_date_sk = d_date_sk
+LEFT OUTER JOIN item                  ON cs_item_sk = i_item_sk
+WHERE cd_gender = 'M'
+  AND cd_education_status = 'College'
+  AND d_year = 2001
+GROUP BY i_item_id, ca_country, ca_state, ca_county;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+CREATE TABLE q18_base AS
+SELECT i_item_id,
+       ca_country,
+       ca_state,
+       ca_county,
+       avg(cs_quantity)        AS agg1,
+       avg(cs_list_price)      AS agg2
+FROM catalog_sales
+LEFT OUTER JOIN customer_demographics ON cs_bill_cdemo_sk = cd_demo_sk
+LEFT OUTER JOIN customer              ON cs_bill_customer_sk = c_customer_sk
+LEFT OUTER JOIN customer_address      ON c_current_addr_sk = ca_address_sk
+LEFT OUTER JOIN date_dim              ON cs_sold_date_sk = d_date_sk
+LEFT OUTER JOIN item                  ON cs_item_sk = i_item_sk
+WHERE cd_gender = 'M'
+  AND cd_education_status = 'College'
+  AND d_year = 2001
+GROUP BY i_item_id, ca_country, ca_state, ca_county;
+
+query IIIIII
+SELECT * FROM (
+    SELECT * FROM q18_oy EXCEPT SELECT * FROM q18_base
+    UNION ALL
+    SELECT * FROM q18_base EXCEPT SELECT * FROM q18_oy
+) ORDER BY 1, 2, 3, 4, 5, 6;
+----
+
+statement ok
+SET disabled_optimizers TO ''

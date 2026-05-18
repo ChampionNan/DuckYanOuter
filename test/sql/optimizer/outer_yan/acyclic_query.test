@@ -1,5 +1,282 @@
 # name: test/sql/optimizer/outer_yan/acyclic_query.test
-# description: OuterYan optimizer — acyclic queries (mix of inner + outer joins) should match
+# description: OuterYan optimizer — applicability gate accepts/rejects per the
+#              conditions in src/optimizer/outer_yan/applicability.cpp.
+#              Accept iff: >=2 base relations, all joins INNER/LEFT/RIGHT/FULL
+#              OUTER, at least one OUTER, equi-join on plain BoundColumnRefs,
+#              acyclic join graph, no set ops, no correlated subqueries, no
+#              window operators, aggregation only at root.
 # group: [outer_yan]
 
-# TODO: scaffolding placeholder. Concrete cases pending OuterYan implementation.
+statement ok
+PRAGMA enable_verification
+
+statement ok
+PRAGMA verify_parallelism
+
+# Common 4-relation seed schema, used across acceptance and rejection cases.
+statement ok
+CREATE TABLE a(id INTEGER, ax INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER, bx INTEGER);
+
+statement ok
+CREATE TABLE c(id INTEGER, cx INTEGER);
+
+statement ok
+CREATE TABLE d(id INTEGER, dx INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20), (3, 30), (4, 40);
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300), (5, 500);
+
+statement ok
+INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
+
+statement ok
+INSERT INTO d VALUES (2, 20000), (3, 30000), (5, 50000);
+
+statement ok
+pragma explain_output='optimized_only'
+
+# ============================================================================
+# ACCEPTED — should produce SJ_BUILD/SJ_PROBE in EXPLAIN
+# ============================================================================
+
+# 3-relation LEFT-LEFT chain — primary accepted shape.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# 3-relation LEFT-RIGHT mix.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id RIGHT JOIN c ON a.id = c.id
+----
+1	100	1000
+3	300	3000
+4	NULL	4000
+
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id RIGHT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# FULL OUTER somewhere in the chain.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+NULL	500	NULL
+
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# 4-relation chain.
+query IIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON a.id = c.id
+     LEFT JOIN d ON a.id = d.id
+----
+1	100	1000	NULL
+2	200	NULL	20000
+3	300	3000	30000
+4	NULL	4000	NULL
+
+# Mix of INNER + OUTER (one OUTER is sufficient to enable).
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+
+# Star shape — fact (a) joined to three dim tables, all LEFT.
+query IIII rowsort
+SELECT a.id, b.bx, c.cx, d.dx
+FROM a LEFT JOIN b ON a.id = b.id
+     LEFT JOIN c ON a.id = c.id
+     LEFT JOIN d ON a.id = d.id
+----
+1	100	1000	NULL
+2	200	NULL	20000
+3	300	3000	30000
+4	NULL	4000	NULL
+
+# Result-equivalence with OuterYan disabled (A/B baseline).
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+# Same plan must NOT have SJ_PROBE when OuterYan is disabled.
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ============================================================================
+# REJECTED — applicability gate must NOT fire; no SJ ops should appear.
+# ============================================================================
+
+# 2-relation INNER (pure-INNER rejection, applicability.cpp:36).
+query II
+EXPLAIN SELECT a.id, b.bx FROM a JOIN b ON a.id = b.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# 3-relation INNER chain (still pure INNER).
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# 2-relation LEFT OUTER (less than 3 relations? actually >=2; rejected for
+# different reason — pure-OUTER 2-relation has nothing to reorder).
+# Whatever the precise reason, the gate should not emit SJ ops.
+query II
+EXPLAIN SELECT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# Theta predicate ("equi-only" gate, applicability.cpp:160).
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id < b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# Expression on join key (not a plain BoundColumnRef).
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id + 1 = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# IS NOT DISTINCT FROM — NULL-tolerant equi-join, not accepted.
+query II
+EXPLAIN SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id IS NOT DISTINCT FROM b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# SEMI join (WHERE EXISTS).
+query II
+EXPLAIN SELECT a.id, b.bx
+FROM a LEFT JOIN b ON a.id = b.id
+WHERE EXISTS (SELECT 1 FROM c WHERE c.id = a.id)
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ANTI join (WHERE NOT EXISTS).
+query II
+EXPLAIN SELECT a.id, b.bx
+FROM a LEFT JOIN b ON a.id = b.id
+WHERE NOT EXISTS (SELECT 1 FROM c WHERE c.id = a.id)
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# Set op above join.
+query II
+EXPLAIN
+SELECT a.id, b.bx FROM a LEFT JOIN b ON a.id = b.id
+UNION ALL
+SELECT a.id, c.cx FROM a LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# Window function above join.
+query II
+EXPLAIN
+SELECT a.id, b.bx, ROW_NUMBER() OVER (PARTITION BY a.id) AS rn
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# Cyclic join graph (3 relations all interconnected).
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id AND a.id = c.id
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# Cross product (no join condition between b and c).
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id, c
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# Correlated subquery in WHERE inside a join skeleton.
+query II
+EXPLAIN
+SELECT a.id, b.bx
+FROM a LEFT JOIN b ON a.id = b.id
+WHERE a.ax = (SELECT MAX(c.cx) FROM c WHERE c.id = a.id)
+----
+logical_opt	<!REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Result-equivalence for rejected shapes — must still be correct after fallback
+# ============================================================================
+
+# Pure INNER chain, OuterYan-disabled and enabled.
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a JOIN b ON a.id = b.id JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+
+statement ok
+SET disabled_optimizers TO ''

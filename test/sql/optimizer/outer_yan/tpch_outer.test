@@ -1,0 +1,92 @@
+# name: test/sql/optimizer/outer_yan/tpch_outer.test
+# description: OuterYan optimizer — TPC-H outer-join sanity at sf=0 (schema +
+#              tiny data). Native outer-join query (q13) + one derived
+#              rewrite. Asserts result-equivalence with/without OuterYan.
+#              Slow tier in tpch_outer.test_slow uses sf=0.01 + reference CSVs.
+# group: [outer_yan]
+
+require tpch
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CALL dbgen(sf=0);
+
+# ============================================================================
+# TPC-H q13: customer LEFT OUTER JOIN orders + grouping aggregation.
+# At sf=0 the result is empty/trivial; primary value is the smoke test.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+SELECT c_count, count(*) AS custdist
+FROM (
+    SELECT c_custkey, count(o_orderkey)
+    FROM customer
+    LEFT OUTER JOIN orders ON c_custkey = o_custkey
+        AND o_comment NOT LIKE '%special%requests%'
+    GROUP BY c_custkey) AS c_orders (c_custkey, c_count)
+GROUP BY c_count
+ORDER BY custdist DESC, c_count DESC;
+
+# Same query under disabled OuterYan — must succeed identically.
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+SELECT c_count, count(*) AS custdist
+FROM (
+    SELECT c_custkey, count(o_orderkey)
+    FROM customer
+    LEFT OUTER JOIN orders ON c_custkey = o_custkey
+        AND o_comment NOT LIKE '%special%requests%'
+    GROUP BY c_custkey) AS c_orders (c_custkey, c_count)
+GROUP BY c_count
+ORDER BY custdist DESC, c_count DESC;
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ============================================================================
+# Derived: TPC-H q3 (customer INNER orders INNER lineitem) rewritten with
+# LEFT OUTER from customer.
+# ============================================================================
+
+statement ok
+SELECT l_orderkey,
+       sum(l_extendedprice * (1 - l_discount)) AS revenue,
+       o_orderdate,
+       o_shippriority
+FROM customer
+LEFT OUTER JOIN orders ON c_custkey = o_custkey
+LEFT OUTER JOIN lineitem ON l_orderkey = o_orderkey
+WHERE c_mktsegment = 'BUILDING'
+  AND o_orderdate < DATE '1995-03-15'
+  AND l_shipdate > DATE '1995-03-15'
+GROUP BY l_orderkey, o_orderdate, o_shippriority
+ORDER BY revenue DESC, o_orderdate
+LIMIT 10;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+SELECT l_orderkey,
+       sum(l_extendedprice * (1 - l_discount)) AS revenue,
+       o_orderdate,
+       o_shippriority
+FROM customer
+LEFT OUTER JOIN orders ON c_custkey = o_custkey
+LEFT OUTER JOIN lineitem ON l_orderkey = o_orderkey
+WHERE c_mktsegment = 'BUILDING'
+  AND o_orderdate < DATE '1995-03-15'
+  AND l_shipdate > DATE '1995-03-15'
+GROUP BY l_orderkey, o_orderdate, o_shippriority
+ORDER BY revenue DESC, o_orderdate
+LIMIT 10;
+
+statement ok
+SET disabled_optimizers TO ''

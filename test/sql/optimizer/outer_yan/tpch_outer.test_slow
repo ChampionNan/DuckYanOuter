@@ -1,0 +1,219 @@
+# name: test/sql/optimizer/outer_yan/tpch_outer.test_slow
+# description: OuterYan optimizer — TPC-H outer-join regression at sf=0.01.
+#              Native outer-join query (q13) + derived rewrites of q3/q5/q10.
+#              Each block asserts result-equivalence with/without OuterYan
+#              (the disabled-baseline result IS the ground truth).
+# group: [outer_yan]
+
+require tpch
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CALL dbgen(sf=0.01);
+
+# ============================================================================
+# TPC-H q13 native — customer LEFT OUTER JOIN orders. Run with OuterYan
+# enabled vs disabled; the row multisets must match.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+CREATE TABLE q13_outeryan AS
+SELECT c_count, count(*) AS custdist
+FROM (
+    SELECT c_custkey, count(o_orderkey)
+    FROM customer
+    LEFT OUTER JOIN orders ON c_custkey = o_custkey
+        AND o_comment NOT LIKE '%special%requests%'
+    GROUP BY c_custkey) AS c_orders (c_custkey, c_count)
+GROUP BY c_count;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+CREATE TABLE q13_baseline AS
+SELECT c_count, count(*) AS custdist
+FROM (
+    SELECT c_custkey, count(o_orderkey)
+    FROM customer
+    LEFT OUTER JOIN orders ON c_custkey = o_custkey
+        AND o_comment NOT LIKE '%special%requests%'
+    GROUP BY c_custkey) AS c_orders (c_custkey, c_count)
+GROUP BY c_count;
+
+# Set-equivalence check — same multiset of (c_count, custdist) pairs.
+query II
+SELECT * FROM (
+    SELECT * FROM q13_outeryan EXCEPT SELECT * FROM q13_baseline
+    UNION ALL
+    SELECT * FROM q13_baseline EXCEPT SELECT * FROM q13_outeryan
+) ORDER BY 1, 2;
+----
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ============================================================================
+# Derived q3 — INNER → LEFT OUTER from customer. The result includes rows
+# from `customer` with no matching orders (which the original q3 dropped).
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+CREATE TABLE q3_outeryan AS
+SELECT l_orderkey,
+       sum(l_extendedprice * (1 - l_discount)) AS revenue,
+       o_orderdate,
+       o_shippriority
+FROM customer
+LEFT OUTER JOIN orders ON c_custkey = o_custkey
+LEFT OUTER JOIN lineitem ON l_orderkey = o_orderkey
+WHERE c_mktsegment = 'BUILDING'
+  AND o_orderdate < DATE '1995-03-15'
+  AND l_shipdate > DATE '1995-03-15'
+GROUP BY l_orderkey, o_orderdate, o_shippriority;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+CREATE TABLE q3_baseline AS
+SELECT l_orderkey,
+       sum(l_extendedprice * (1 - l_discount)) AS revenue,
+       o_orderdate,
+       o_shippriority
+FROM customer
+LEFT OUTER JOIN orders ON c_custkey = o_custkey
+LEFT OUTER JOIN lineitem ON l_orderkey = o_orderkey
+WHERE c_mktsegment = 'BUILDING'
+  AND o_orderdate < DATE '1995-03-15'
+  AND l_shipdate > DATE '1995-03-15'
+GROUP BY l_orderkey, o_orderdate, o_shippriority;
+
+query IIII
+SELECT * FROM (
+    SELECT * FROM q3_outeryan EXCEPT SELECT * FROM q3_baseline
+    UNION ALL
+    SELECT * FROM q3_baseline EXCEPT SELECT * FROM q3_outeryan
+);
+----
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ============================================================================
+# Derived q5 — 5-relation star with LEFT OUTER from lineitem (fact). Exercises
+# OJT degree-driven parent choice.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+CREATE TABLE q5_outeryan AS
+SELECT n_name, sum(l_extendedprice * (1 - l_discount)) AS revenue
+FROM lineitem
+LEFT OUTER JOIN orders ON l_orderkey = o_orderkey
+LEFT OUTER JOIN customer ON c_custkey = o_custkey
+LEFT OUTER JOIN supplier ON l_suppkey = s_suppkey
+LEFT OUTER JOIN nation ON c_nationkey = n_nationkey AND s_nationkey = n_nationkey
+LEFT OUTER JOIN region ON n_regionkey = r_regionkey
+WHERE r_name = 'ASIA'
+  AND o_orderdate >= DATE '1994-01-01'
+  AND o_orderdate < DATE '1995-01-01'
+GROUP BY n_name;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+CREATE TABLE q5_baseline AS
+SELECT n_name, sum(l_extendedprice * (1 - l_discount)) AS revenue
+FROM lineitem
+LEFT OUTER JOIN orders ON l_orderkey = o_orderkey
+LEFT OUTER JOIN customer ON c_custkey = o_custkey
+LEFT OUTER JOIN supplier ON l_suppkey = s_suppkey
+LEFT OUTER JOIN nation ON c_nationkey = n_nationkey AND s_nationkey = n_nationkey
+LEFT OUTER JOIN region ON n_regionkey = r_regionkey
+WHERE r_name = 'ASIA'
+  AND o_orderdate >= DATE '1994-01-01'
+  AND o_orderdate < DATE '1995-01-01'
+GROUP BY n_name;
+
+query II
+SELECT * FROM (
+    SELECT * FROM q5_outeryan EXCEPT SELECT * FROM q5_baseline
+    UNION ALL
+    SELECT * FROM q5_baseline EXCEPT SELECT * FROM q5_outeryan
+);
+----
+
+statement ok
+SET disabled_optimizers TO ''
+
+# ============================================================================
+# Derived q10 — LEFT OUTER chain (customer → orders → lineitem → nation).
+# 4-relation chain reordering test.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+CREATE TABLE q10_outeryan AS
+SELECT c_custkey,
+       c_name,
+       sum(l_extendedprice * (1 - l_discount)) AS revenue,
+       c_acctbal,
+       n_name,
+       c_address,
+       c_phone,
+       c_comment
+FROM customer
+LEFT OUTER JOIN orders ON c_custkey = o_custkey
+LEFT OUTER JOIN lineitem ON l_orderkey = o_orderkey
+LEFT OUTER JOIN nation ON c_nationkey = n_nationkey
+WHERE o_orderdate >= DATE '1993-10-01'
+  AND o_orderdate < DATE '1994-01-01'
+  AND l_returnflag = 'R'
+GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment;
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+CREATE TABLE q10_baseline AS
+SELECT c_custkey,
+       c_name,
+       sum(l_extendedprice * (1 - l_discount)) AS revenue,
+       c_acctbal,
+       n_name,
+       c_address,
+       c_phone,
+       c_comment
+FROM customer
+LEFT OUTER JOIN orders ON c_custkey = o_custkey
+LEFT OUTER JOIN lineitem ON l_orderkey = o_orderkey
+LEFT OUTER JOIN nation ON c_nationkey = n_nationkey
+WHERE o_orderdate >= DATE '1993-10-01'
+  AND o_orderdate < DATE '1994-01-01'
+  AND l_returnflag = 'R'
+GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment;
+
+query IIIIIIII
+SELECT * FROM (
+    SELECT * FROM q10_outeryan EXCEPT SELECT * FROM q10_baseline
+    UNION ALL
+    SELECT * FROM q10_baseline EXCEPT SELECT * FROM q10_outeryan
+);
+----
+
+statement ok
+SET disabled_optimizers TO ''

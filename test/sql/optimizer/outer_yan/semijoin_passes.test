@@ -1,0 +1,148 @@
+# name: test/sql/optimizer/outer_yan/semijoin_passes.test
+# description: OuterYan optimizer — bottom-up and top-down semi-join pair
+#              recording from src/optimizer/outer_yan/semijoin_insertion.cpp.
+#              Verifies that LOGICAL_SJ_BUILD and LOGICAL_SJ_PROBE both appear
+#              in the plan for each OJTEdgeKind (INNER, L-outer, R-outer,
+#              F-outer) — proves both passes fire.
+# group: [outer_yan]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+PRAGMA verify_parallelism
+
+statement ok
+CREATE TABLE a(id INTEGER, ax INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER, bx INTEGER);
+
+statement ok
+CREATE TABLE c(id INTEGER, cx INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20), (3, 30), (4, 40);
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300), (5, 500);
+
+statement ok
+INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
+
+statement ok
+PRAGMA explain_output='optimized_only'
+
+# ============================================================================
+# At least one SJ_BUILD AND one SJ_PROBE must appear when OuterYan accepts.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_BUILD.*
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# INNER + outer mix — inner edge participates in both bottom-up and top-down
+# passes; outer edges have direction-dependent participation.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# LEFT OUTER chain — exercises top-down pass primarily (child = preserved side).
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON b.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# RIGHT OUTER chain — exercises bottom-up pass primarily.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# FULL OUTER — neither side is preserved; both passes can still run on
+# child→parent and parent→child semantics.
+# ============================================================================
+
+query II
+EXPLAIN
+SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+logical_opt	<REGEX>:.*SJ_PROBE.*
+
+# ============================================================================
+# Correctness regression across each kind — the semi-join insertion must not
+# alter the row multiset. Each block is a result-equivalence assertion.
+# ============================================================================
+
+statement ok
+PRAGMA explain_output='default'
+
+statement ok
+SET disabled_optimizers TO ''
+
+# LEFT OUTER chain.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+
+# RIGHT OUTER chain.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a RIGHT JOIN b ON a.id = b.id RIGHT JOIN c ON b.id = c.id
+----
+1	100	1000
+3	300	3000
+NULL	NULL	4000
+
+# FULL OUTER chain.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a FULL OUTER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+NULL	500	NULL
+
+# INNER + LEFT mix.
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a INNER JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000

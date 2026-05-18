@@ -1,0 +1,217 @@
+# name: test/sql/optimizer/outer_yan/bitmap_budget.test
+# description: OuterYan optimizer — the `outer_yan_bitmap_max_bytes` SET VARIABLE
+#              gates the BITMAP-vs-HASH choice in PhysicalSJBuild::Finalize.
+#              Tests assert result correctness across budget settings; the
+#              filter-kind choice itself is verified at the unit level
+#              (test/optimizer/outer_yan/key_bitmap_test.cpp).
+# group: [outer_yan]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+PRAGMA verify_parallelism
+
+statement ok
+CREATE TABLE a(id INTEGER, ax INTEGER);
+
+statement ok
+CREATE TABLE b(id INTEGER, bx INTEGER);
+
+statement ok
+CREATE TABLE c(id INTEGER, cx INTEGER);
+
+statement ok
+INSERT INTO a VALUES (1, 10), (2, 20), (3, 30), (4, 40), (5, 50);
+
+statement ok
+INSERT INTO b VALUES (1, 100), (2, 200), (3, 300), (5, 500);
+
+statement ok
+INSERT INTO c VALUES (1, 1000), (3, 3000), (4, 4000);
+
+# ============================================================================
+# Default budget (16 MiB) — small INTEGER keys take the BITMAP path. Result
+# must be correct; this is the canonical happy-path.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+5	500	NULL
+
+# ============================================================================
+# Force HashFilter fallback by setting budget to 0 — every filter must use
+# HashFilter. Results must remain identical to the BITMAP path.
+# ============================================================================
+
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 0;
+
+query III rowsort
+SELECT a.id, b.bx, c.cx
+FROM a LEFT JOIN b ON a.id = b.id LEFT JOIN c ON a.id = c.id
+----
+1	100	1000
+2	200	NULL
+3	300	3000
+4	NULL	4000
+5	500	NULL
+
+# Reset.
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+
+# ============================================================================
+# Tiny budget (16 bytes = 128 bits) forces HashFilter on any key range
+# wider than 128. Use a wider-range table to straddle the threshold.
+# ============================================================================
+
+statement ok
+CREATE TABLE wide(id INTEGER, wx INTEGER);
+
+statement ok
+INSERT INTO wide VALUES (1, 1), (50, 50), (100, 100), (250, 250), (500, 500), (999, 999);
+
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 16;
+
+# Range [1, 999] needs 125 bytes → exceeds 16-byte budget → HashFilter.
+query II rowsort
+SELECT a.id, wide.wx FROM a LEFT JOIN wide ON a.id = wide.id LEFT JOIN c ON a.id = c.id
+----
+1	1
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+
+# ============================================================================
+# VARCHAR keys always take HashFilter (KeyBitmap type-rejects). Result must
+# be correct regardless of budget setting.
+# ============================================================================
+
+statement ok
+CREATE TABLE av(label VARCHAR, ax INTEGER);
+
+statement ok
+CREATE TABLE bv(label VARCHAR, bx INTEGER);
+
+statement ok
+CREATE TABLE cv(label VARCHAR, cx INTEGER);
+
+statement ok
+INSERT INTO av VALUES ('foo', 1), ('bar', 2), ('baz', 3);
+
+statement ok
+INSERT INTO bv VALUES ('foo', 100), ('bar', 200), ('qux', 400);
+
+statement ok
+INSERT INTO cv VALUES ('foo', 1000), ('baz', 3000);
+
+query III rowsort
+SELECT av.label, bv.bx, cv.cx
+FROM av LEFT JOIN bv ON av.label = bv.label LEFT JOIN cv ON av.label = cv.label
+----
+bar	200	NULL
+baz	NULL	3000
+foo	100	1000
+
+# Same query at budget 0 — still correct.
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 0;
+
+query III rowsort
+SELECT av.label, bv.bx, cv.cx
+FROM av LEFT JOIN bv ON av.label = bv.label LEFT JOIN cv ON av.label = cv.label
+----
+bar	200	NULL
+baz	NULL	3000
+foo	100	1000
+
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+
+# ============================================================================
+# Mixed schema — some filters BITMAP, some HASH. Each filter is decided
+# independently in PhysicalSJBuild::Finalize.
+# ============================================================================
+
+statement ok
+CREATE TABLE mix_int(id INTEGER, ix INTEGER);
+
+statement ok
+CREATE TABLE mix_str(id INTEGER, sx VARCHAR);
+
+statement ok
+INSERT INTO mix_int VALUES (1, 10), (2, 20), (3, 30);
+
+statement ok
+INSERT INTO mix_str VALUES (1, 'one'), (3, 'three'), (4, 'four');
+
+query III rowsort
+SELECT a.id, mix_int.ix, mix_str.sx
+FROM a LEFT JOIN mix_int ON a.id = mix_int.id LEFT JOIN mix_str ON a.id = mix_str.id
+----
+1	10	one
+2	20	NULL
+3	30	three
+4	NULL	four
+5	NULL	NULL
+
+# ============================================================================
+# Larger build side — exercises HashFilter resizing under load factor 3/4.
+# ============================================================================
+
+statement ok
+CREATE TABLE big(id INTEGER, val INTEGER);
+
+statement ok
+INSERT INTO big SELECT i, i*10 FROM range(1, 5000) t(i);
+
+statement ok
+CREATE TABLE small(id INTEGER, sx INTEGER);
+
+statement ok
+INSERT INTO small VALUES (1, 10), (2, 20), (3, 30), (4999, 49990), (5000, 50000);
+
+query II rowsort
+SELECT small.id, big.val
+FROM small LEFT JOIN big ON small.id = big.id LEFT JOIN a ON small.id = a.id
+----
+1	10
+2	20
+3	30
+4999	49990
+5000	NULL
+
+# Force HashFilter for big — range [1, 4999] takes ~625 bytes; budget 256 rejects.
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 256;
+
+query II rowsort
+SELECT small.id, big.val
+FROM small LEFT JOIN big ON small.id = big.id LEFT JOIN a ON small.id = a.id
+----
+1	10
+2	20
+3	30
+4999	49990
+5000	NULL
+
+statement ok
+SET VARIABLE outer_yan_bitmap_max_bytes = 16777216;
+
+statement ok
+SET disabled_optimizers TO ''

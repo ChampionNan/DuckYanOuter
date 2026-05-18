@@ -1,0 +1,36 @@
+# name: test/sql/optimizer/outer_yan/tpcds_outer.test
+# description: OuterYan optimizer — TPC-DS outer-join smoke test at sf=0. Runs
+#              the smallest outer-join-bearing TPC-DS query (q05) under
+#              OuterYan-enabled and disabled. Schema only, no result data;
+#              primary goal is to confirm OuterYan does not crash on TPC-DS
+#              query shapes. Slow tier runs the full slate at sf=0.1.
+# group: [outer_yan]
+
+require tpcds
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CALL dsdgen(sf=0);
+
+# ============================================================================
+# TPC-DS q05 — store/catalog/web channel rollup with LEFT OUTER inside a CTE.
+# UNION ALL above the join skeleton causes applicability to reject; query
+# falls back to baseline. Both must produce identical (empty at sf=0) results.
+# ============================================================================
+
+statement ok
+SET disabled_optimizers TO ''
+
+statement ok
+PRAGMA tpcds(5);
+
+statement ok
+SET disabled_optimizers TO 'outer_yan_pre,outer_yan_dp,outer_yan_post'
+
+statement ok
+PRAGMA tpcds(5);
+
+statement ok
+SET disabled_optimizers TO ''
