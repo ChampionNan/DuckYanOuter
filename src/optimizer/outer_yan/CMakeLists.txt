@@ -1,10 +1,10 @@
 add_library_unity(
   duckdb_optimizer_outer_yan
   OBJECT
+  agg_pushdown.cpp
   aggregate_pushdown_outer.cpp
   applicability.cpp
   desimplification.cpp
-  evaluation_order.cpp
   hash_filter.cpp
   key_bitmap.cpp
   operator_tree.cpp

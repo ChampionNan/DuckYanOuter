@@ -15,6 +15,7 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
@@ -204,6 +205,8 @@ private:
 			return BuildThroughProjection(op, depth);
 		case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
 			return BuildThroughAggregate(op, depth);
+		case LogicalOperatorType::LOGICAL_DISTINCT:
+			return BuildThroughDistinct(op, depth);
 		default:
 			throw NotImplementedException("LogicalPlanToOT: unsupported operator %s",
 			                              EnumUtil::ToString(op.type));
@@ -299,6 +302,35 @@ private:
 		return BuildNode(*op.children[0], depth);
 	}
 
+	//! Peel a root LogicalDistinct, classify it as `SELECT_DISTINCT`, and
+	//! record each child binding as a distinct target in
+	//! `tree.root_aggregation.columns`. Mirrors the reference's
+	//! `StoreDistinctAggregates` (`aggregation_pushdown.cpp:272`).
+	unique_ptr<OTNode> BuildThroughDistinct(LogicalOperator &op, idx_t depth) {
+		if (op.children.size() != 1) {
+			throw InternalException("LogicalDistinct with %llu children",
+			                        op.children.size());
+		}
+		auto &distinct = op.Cast<LogicalDistinct>();
+		auto &info = tree.root_aggregation;
+		// Outermost classifier wins — defensive against nested distincts.
+		if (info.type == OuterYanAggregationType::NONE) {
+			info.type = OuterYanAggregationType::SELECT_DISTINCT;
+			info.has_group_by = false;
+			// Record each child binding as a "distinct" target so the
+			// rewriter knows which columns the root distinct cares about.
+			auto child_bindings = distinct.children[0]->GetColumnBindings();
+			distinct.children[0]->ResolveOperatorTypes();
+			for (idx_t i = 0; i < child_bindings.size(); i++) {
+				OuterYanAggregateColumn col;
+				col.function_name = "distinct";
+				col.binding = child_bindings[i];
+				info.columns.push_back(std::move(col));
+			}
+		}
+		return BuildNode(*op.children[0], depth);
+	}
+
 	//! Record the root aggregate's type tag and per-expression column info on
 	//! `tree.root_aggregation`. Classification is by aggregate function name
 	//! only -- mirrors `DuckDBYanPlus::DetectQueryType` (optimizer.cpp:533) and
@@ -312,6 +344,23 @@ private:
 		}
 		info.agg_op = &agg;
 		info.has_group_by = !agg.groups.empty();
+
+		// Capture GROUP BY column bindings. These columns anchor the OJT root:
+		// `ResolveAggregationRelations` feeds them into `tree.root_relations`,
+		// which OuterYanDP consults to force the corresponding relations to the
+		// top of the chosen tree. Non-column GROUP BY expressions (e.g.
+		// `GROUP BY a + b`) are skipped here -- handling them would require a
+		// full expression walk; prototype scope leaves it as future work.
+		for (auto &group_expr : agg.groups) {
+			if (!group_expr ||
+			    group_expr->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+				continue;
+			}
+			OuterYanAggregateColumn col;
+			col.function_name = "group_by";
+			col.binding = group_expr->Cast<BoundColumnRefExpression>().binding;
+			info.columns.push_back(std::move(col));
+		}
 
 		bool any_count_star = false;
 		bool any_minmax = false;
@@ -380,8 +429,15 @@ private:
 				continue;
 			}
 			auto it = tree.table_to_relation.find(col.binding.table_index.index);
-			if (it != tree.table_to_relation.end()) {
-				col.relation = it->second;
+			if (it == tree.table_to_relation.end()) {
+				continue;
+			}
+			col.relation = it->second;
+			// Only GROUP BY / SELECT DISTINCT bindings anchor the OJT root --
+			// raw aggregate-function arguments (e.g. min/max/sum input columns)
+			// do not impose a position constraint on their relation.
+			if (col.function_name == "group_by" || col.function_name == "distinct") {
+				tree.root_relations.insert(it->second);
 			}
 		}
 	}

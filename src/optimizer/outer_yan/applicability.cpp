@@ -59,6 +59,15 @@ LogicalOperator &OuterYanApplicability::SkeletonRoot(LogicalOperator &plan) {
 			cur = cur->children[0].get();
 		}
 		skip_pf();
+	} else if (cur->type == LogicalOperatorType::LOGICAL_DISTINCT) {
+		// SELECT DISTINCT root — treated as a root-agg shape for the
+		// pushdown classifier (handled by BuildThroughDistinct in
+		// BuildOT). Strip the LogicalDistinct and continue peeling.
+		result.has_root_aggregate = true;
+		if (!cur->children.empty()) {
+			cur = cur->children[0].get();
+		}
+		skip_pf();
 	}
 	return *cur;
 }

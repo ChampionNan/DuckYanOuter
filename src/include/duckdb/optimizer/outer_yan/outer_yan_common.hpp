@@ -145,11 +145,14 @@ public:
 //! (`count`, `count_star`, `min`, `max`, `sum`); no `IsDistributive` /
 //! `IsHolistic` helper is involved.
 enum class OuterYanAggregationType : uint8_t {
-	NONE,        //!< query has no root aggregation
-	COUNT_STAR,  //!< `count_star()` with empty GROUP BY
-	MINMAX,      //!< only `min` / `max` aggregates
-	SUM,         //!< `sum`, or `count` / `count_star` with non-empty GROUP BY
-	OTHER        //!< unsupported / mixed aggregate shape
+	NONE,            //!< query has no root aggregation
+	COUNT_STAR,      //!< `count_star()` with empty GROUP BY
+	MINMAX,          //!< only `min` / `max` aggregates
+	SUM,             //!< `sum`, or `count` / `count_star` with non-empty GROUP BY
+	SELECT_DISTINCT, //!< root is a `LogicalDistinct`; aggregation pushdown
+	                 //!< wraps each push site with a child `LogicalDistinct`
+	                 //!< over its bindings. No annot projection or root rewrite.
+	OTHER            //!< unsupported / mixed aggregate shape
 };
 
 //! Per-aggregate column descriptor recorded during OT build. For
@@ -192,6 +195,34 @@ struct OuterYanSemiPair {
 	RelationId build = 0;
 	RelationId probe = 0;
 	vector<OuterYanSemiKey> keys;
+};
+
+//! Aggregate-pushdown decision recorded once per OJT edge by
+//! `AggPushdownMarker` (runs inside `OuterYanPost` between `Resimplify` and
+//! `OJTToLogicalPlan`) and consumed by `AggregatePushdownOuter` while
+//! visiting the rebuilt LogicalPlan.
+//!
+//! One entry per OJT edge. The vector is **sorted by `order` ascending**
+//! so that `agg_pushdown_decisions[k]` corresponds 1:1 with the k-th
+//! `LogicalComparisonJoin` visited by `LogicalOperatorVisitor` under a
+//! post-order walk of the rebuilt plan — same ordering convention that
+//! `OuterYanTree::OJTToLogicalPlan` uses when emitting joins.
+//!
+//! PK-FK edges always carry `push_into_child = false`. Edges whose
+//! analytically-derived live column set exceeds `GROUP_BY_NUM` also carry
+//! `false`. All other edges carry `true`.
+struct OuterYanAggPushdownDecision {
+	//! Parent endpoint's `OJTNode::relation_id`. Debug / sanity-check only.
+	RelationId parent_relation_id = 0;
+	//! Child endpoint's `OJTNode::relation_id`. Debug / sanity-check only.
+	RelationId child_relation_id = 0;
+	//! `OJTEdge::order` — the ordering key. Decisions are emitted sorted
+	//! by this field; the visitor's `current_join_id++` indexes the
+	//! resulting dense vector.
+	idx_t order = 0;
+	//! True iff the visitor should wrap this join's child subplan with a
+	//! `LogicalAggregate` (plus enclosing annot projection).
+	bool push_into_child = false;
 };
 
 } // namespace duckdb

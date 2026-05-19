@@ -10,6 +10,7 @@
 
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/optimizer/outer_yan/applicability.hpp"
 #include "duckdb/optimizer/outer_yan/operator_tree.hpp"
@@ -117,6 +118,19 @@ public:
 	//! the projection/aggregate chain above the join skeleton. Consumed by
 	//! OuterYanDP's forced-root logic for aggregation queries.
 	OuterYanRootAggregation root_aggregation;
+	//! Relations that must sit at the top of the OJT in the DP's chosen
+	//! ordering. Populated by `BuildOT` from the bindings of GROUP BY
+	//! expressions (for `LogicalAggregate`) and DISTINCT-projected columns
+	//! (for `LogicalDistinct`). Empty iff the query has no aggregation or its
+	//! aggregation does not anchor any specific relation (e.g. COUNT_STAR
+	//! without GROUP BY). Consumed by `OuterYanDP::Optimize`:
+	//!   - Tier 1 (top-prefix): no intermediate DP subset may contain a
+	//!     relation in this set while still missing any relation outside it.
+	//!   - Tier 2 (single pinned root): if Tier 1 admits no plan, DP retries
+	//!     once per candidate root with the weaker constraint that the
+	//!     pinned root must appear only at the final emit; the cheapest plan
+	//!     across candidates wins.
+	unordered_set<RelationId> root_relations;
 	//! Phase 1 (bottom-up) semi-join pairs. Recorded by `OuterYanPre` from
 	//! a post-simplification, pre-desimplification OJT snapshot; consumed
 	//! by `SemijoinInsertion`. Each entry corresponds to an OJT edge with
@@ -127,6 +141,13 @@ public:
 	//! OJT edge with `kind ∈ {LEFT, INNER}`; semantically
 	//! `child := child ⋉ parent`, so `build = parent` and `probe = child`.
 	vector<OuterYanSemiPair> top_down_pairs;
+	//! Per-edge aggregate-pushdown decisions, populated by
+	//! `AggPushdownMarker` inside `OuterYanPost` and consumed by
+	//! `AggregatePushdownOuter` while visiting the rebuilt plan. Sorted by
+	//! `OuterYanAggPushdownDecision::order` ascending so the vector is a
+	//! dense, position-indexed mirror of the join post-order seen by
+	//! `LogicalOperatorVisitor::VisitOperator`.
+	vector<OuterYanAggPushdownDecision> agg_pushdown_decisions;
 
 private:
 	//! BuildOT driver class; defined in outer_yan_tree.cpp. Nested so it can

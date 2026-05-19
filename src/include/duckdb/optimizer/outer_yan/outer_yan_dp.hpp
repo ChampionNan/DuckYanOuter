@@ -60,10 +60,56 @@ public:
 	static constexpr idx_t MAX_PAIRS = 10000;
 
 private:
+	//! Which root-fix regime is applied to every candidate subset during
+	//! DPccp / greedy enumeration. "Output relations" are the relations that
+	//! carry GROUP BY / SELECT DISTINCT columns -- they must end up above all
+	//! "non-output" relations in the chosen tree.
+	//!
+	//!   - `NONE`              — no output relation is anchored. Used either
+	//!                            when the query is not aggregating or when
+	//!                            the aggregation does not pin any relation
+	//!                            (e.g. COUNT_STAR with no GROUP BY).
+	//!                            Enumeration is fully unconstrained.
+	//!   - `FIX_ALL_OUTPUTS`   — primary regime when the query is anchored.
+	//!                            Every relation in `output_relations` must
+	//!                            sit above every non-output relation. An
+	//!                            intermediate subset is rejected iff it
+	//!                            contains at least one output relation while
+	//!                            still missing some non-output relation.
+	//!   - `FIX_ONE_OUTPUT`    — relaxed fallback when `FIX_ALL_OUTPUTS`
+	//!                            admits no plan. A single chosen output
+	//!                            relation (`fixed_output_relation`) is
+	//!                            forbidden from every intermediate subset
+	//!                            and must enter at the final emit. The
+	//!                            other output relations are unconstrained
+	//!                            and may interleave with non-output
+	//!                            relations. `Optimize` tries every output
+	//!                            relation as the pinned candidate and keeps
+	//!                            the cheapest resulting plan.
+	enum class RootFixMode { NONE, FIX_ALL_OUTPUTS, FIX_ONE_OUTPUT };
+
 	// ---- setup ----
 	void BuildLeafRelations(OuterYanTree &tree);
 	void BuildEdgesFromOT(OuterYanTree &tree);
 	void InitLeafPlans(OuterYanTree &tree);
+	//! Translate `tree.root_relations` (RelationId, the GROUP BY / DISTINCT
+	//! anchor set) into the DP-side `output_relations` (RelationIndex) and
+	//! cache `num_non_output`. Sets `fix_mode` to `FIX_ALL_OUTPUTS` when the
+	//! anchor set is non-empty, otherwise `NONE`.
+	void PopulateOutputRelations(OuterYanTree &tree);
+	//! Reset enumeration state between attempts. Clears `plans`, `pairs`,
+	//! `bailed_out`, then repopulates leaf plans so the next attempt starts
+	//! from a clean memo.
+	void ResetForRetry(OuterYanTree &tree);
+	//! Drive a single enumeration attempt under the currently-set `fix_mode`.
+	//! Chooses exact DPccp or greedy based on `num_relations`, mirroring the
+	//! original `Optimize` policy; on pair-cap fallback it re-initialises
+	//! leaf plans before retrying greedy. Returns `true` on success (a plan
+	//! may or may not cover the full set; the caller checks `plans`).
+	bool RunEnumeration(OuterYanTree &tree);
+	//! Reject `set` if it would violate the active root-fix regime. Always
+	//! permits the full set (`set.count == num_relations`).
+	bool ViolatesRootFix(JoinRelationSet &set) const;
 
 	// ---- DPccp body (mirrors PlanEnumerator) ----
 	bool SolveExactly();
@@ -142,6 +188,22 @@ private:
 	//! Set if greedy could not connect all relations without a cross product.
 	//! On true, `Optimize` leaves the OT untouched (Path A bail-out).
 	bool bailed_out = false;
+	//! Active root-fix regime for the current enumeration attempt. Set by
+	//! `PopulateOutputRelations` for the first (FIX_ALL_OUTPUTS) attempt and
+	//! by `Optimize` before each subsequent FIX_ONE_OUTPUT retry.
+	RootFixMode fix_mode = RootFixMode::NONE;
+	//! GROUP BY / SELECT DISTINCT anchor relations, translated from
+	//! `tree.root_relations`. Populated by `PopulateOutputRelations`. Drives
+	//! `FIX_ALL_OUTPUTS`; in `FIX_ONE_OUTPUT` the set is still consulted to
+	//! enumerate retry candidates from `Optimize`.
+	unordered_set<RelationIndex> output_relations;
+	//! Cached `num_relations - output_relations.size()`. Used by the
+	//! `FIX_ALL_OUTPUTS` predicate to test "covers every non-output" without
+	//! recounting on each call.
+	idx_t num_non_output = 0;
+	//! In `FIX_ONE_OUTPUT`, the single output relation forced to be the
+	//! final-emit addition. Unused in `NONE` / `FIX_ALL_OUTPUTS`.
+	RelationIndex fixed_output_relation = RelationIndex(0);
 };
 
 } // namespace duckdb

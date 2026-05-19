@@ -32,28 +32,9 @@ void OuterYanDP::Optimize(OuterYanTree &tree) {
 
 	BuildLeafRelations(tree);
 	BuildEdgesFromOT(tree);
-	InitLeafPlans(tree);
+	PopulateOutputRelations(tree);
 
 	if (num_relations <= 1) {
-		return;
-	}
-
-	bool ok = false;
-	if (num_relations >= THRESHOLD_TO_SWAP_TO_APPROXIMATE) {
-		ok = SolveApproximately();
-	} else {
-		ok = SolveExactly();
-		if (!ok) {
-			// Pair cap tripped -- fall back to greedy.
-			plans.clear();
-			pairs = 0;
-			InitLeafPlans(tree);
-			ok = SolveApproximately();
-		}
-	}
-
-	if (!ok || bailed_out) {
-		// Path A bail-out: OT untouched, downstream passes see the original order.
 		return;
 	}
 
@@ -62,12 +43,140 @@ void OuterYanDP::Optimize(OuterYanTree &tree) {
 		bindings.emplace(RelationIndex(i));
 	}
 	auto &full_set = set_manager.GetJoinRelation(bindings);
-	if (plans.find(full_set) == plans.end()) {
-		// DPccp could not connect all relations without a cross product.
+
+	// First attempt: `FIX_ALL_OUTPUTS` when the query anchors outputs,
+	// otherwise unconstrained (`NONE`). Subsequent attempts pin each output
+	// relation as the sole `FIX_ONE_OUTPUT` candidate in turn -- only useful
+	// when an anchor exists, so they are skipped under `NONE`. The cheapest
+	// plan over all attempts wins. Re-running the winning attempt
+	// deterministically (rather than snapshotting the chosen plan) keeps the
+	// memo management trivial; small `num_relations` makes the 2x cost
+	// acceptable.
+	const auto primary_mode = output_relations.empty() ? RootFixMode::NONE
+	                                                    : RootFixMode::FIX_ALL_OUTPUTS;
+	vector<RelationIndex> fix_one_candidates(output_relations.begin(), output_relations.end());
+	const idx_t total_attempts =
+	    primary_mode == RootFixMode::NONE ? 1 : 1 + fix_one_candidates.size();
+
+	double best_cost = NumericLimits<double>::Maximum();
+	int64_t best_attempt = -1;
+	for (idx_t attempt = 0; attempt < total_attempts; attempt++) {
+		ResetForRetry(tree);
+		if (attempt == 0) {
+			fix_mode = primary_mode;
+		} else {
+			fix_mode = RootFixMode::FIX_ONE_OUTPUT;
+			fixed_output_relation = fix_one_candidates[attempt - 1];
+		}
+		if (!RunEnumeration(tree)) {
+			continue;
+		}
+		auto entry = plans.find(full_set);
+		if (entry == plans.end()) {
+			continue;
+		}
+		const double cost = entry->second->cost;
+		if (cost < best_cost) {
+			best_cost = cost;
+			best_attempt = static_cast<int64_t>(attempt);
+		}
+	}
+
+	if (best_attempt < 0) {
+		// No regime produced a connected plan over all relations -- Path A
+		// bail-out: OT untouched, downstream passes see the original order.
 		return;
 	}
+
+	// Re-run the winning attempt so `plans` is populated for RebuildOT.
+	ResetForRetry(tree);
+	if (best_attempt == 0) {
+		fix_mode = primary_mode;
+	} else {
+		fix_mode = RootFixMode::FIX_ONE_OUTPUT;
+		fixed_output_relation = fix_one_candidates[static_cast<idx_t>(best_attempt) - 1];
+	}
+	if (!RunEnumeration(tree) || plans.find(full_set) == plans.end()) {
+		// Deterministic re-run cannot diverge from the first attempt; this
+		// branch is unreachable under normal operation. Bail safely.
+		return;
+	}
+
 	RebuildOT(tree, full_set);
 	tree.BuildOJT();
+}
+
+// ============================================================================
+// Root-fix constraint plumbing (FIX_ALL_OUTPUTS / FIX_ONE_OUTPUT)
+// ============================================================================
+
+void OuterYanDP::PopulateOutputRelations(OuterYanTree &tree) {
+	output_relations.clear();
+	for (auto rel_id : tree.root_relations) {
+		if (rel_id < num_relations) {
+			output_relations.emplace(RelationIndex(rel_id));
+		}
+	}
+	num_non_output = num_relations - output_relations.size();
+	fix_mode = output_relations.empty() ? RootFixMode::NONE : RootFixMode::FIX_ALL_OUTPUTS;
+}
+
+void OuterYanDP::ResetForRetry(OuterYanTree &tree) {
+	plans.clear();
+	pairs = 0;
+	bailed_out = false;
+	InitLeafPlans(tree);
+}
+
+bool OuterYanDP::RunEnumeration(OuterYanTree &tree) {
+	if (num_relations >= THRESHOLD_TO_SWAP_TO_APPROXIMATE) {
+		return SolveApproximately();
+	}
+	if (SolveExactly()) {
+		return true;
+	}
+	// Pair cap tripped -- fall back to greedy (matches the original
+	// Optimize-time fallback policy).
+	plans.clear();
+	pairs = 0;
+	InitLeafPlans(tree);
+	return SolveApproximately();
+}
+
+bool OuterYanDP::ViolatesRootFix(JoinRelationSet &set) const {
+	if (set.count == num_relations) {
+		// The final emit is unconditionally legal: output relations are
+		// allowed to enter exactly here.
+		return false;
+	}
+	switch (fix_mode) {
+	case RootFixMode::NONE:
+		return false;
+	case RootFixMode::FIX_ALL_OUTPUTS: {
+		idx_t outputs_in = 0;
+		for (idx_t i = 0; i < set.count; i++) {
+			if (output_relations.count(set.relations[i]) != 0) {
+				outputs_in++;
+			}
+		}
+		if (outputs_in == 0) {
+			return false;  // Pure non-output subset -- always legal.
+		}
+		// Contains >=1 output relation: must already cover every non-output
+		// relation, otherwise some non-output would be forced to enter above
+		// an output relation in the final tree.
+		const idx_t non_output_in = set.count - outputs_in;
+		return non_output_in != num_non_output;
+	}
+	case RootFixMode::FIX_ONE_OUTPUT:
+		for (idx_t i = 0; i < set.count; i++) {
+			if (set.relations[i] == fixed_output_relation) {
+				return true;
+			}
+		}
+		return false;
+	}
+	return false;
 }
 
 // ============================================================================
@@ -291,6 +400,12 @@ bool OuterYanDP::EnumerateCSGRecursive(JoinRelationSet &node, unordered_set<Rela
 
 bool OuterYanDP::TryEmitPair(JoinRelationSet &left, JoinRelationSet &right,
                              const vector<reference<NeighborInfo>> &info) {
+	auto &union_set = set_manager.Union(left, right);
+	if (ViolatesRootFix(union_set)) {
+		// Skip silently; the violating subset never enters the memo. Does not
+		// count toward the pair cap since no real DP work was performed.
+		return true;
+	}
 	pairs++;
 	if (pairs >= MAX_PAIRS) {
 		return false;
@@ -447,6 +562,12 @@ bool OuterYanDP::SolveApproximately() {
 				auto &r = live[j].get();
 				auto connections = query_graph.GetConnections(l, r);
 				if (connections.empty()) {
+					continue;
+				}
+				auto &candidate_set = set_manager.Union(l, r);
+				if (ViolatesRootFix(candidate_set)) {
+					// Forbidden union under the active root-fix regime;
+					// skip without recording a memo entry.
 					continue;
 				}
 				auto &candidate = EmitPair(l, r, connections);

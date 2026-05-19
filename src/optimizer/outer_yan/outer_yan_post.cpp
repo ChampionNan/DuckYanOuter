@@ -13,20 +13,21 @@ unique_ptr<LogicalOperator> OuterYanPost::Optimize(OuterYanTree &tree) {
 		throw InternalException("OuterYanPost::Optimize: tree has no OJT");
 	}
 
-	// Pipeline (plan 3): Resimplify → OrderFixApply → OJTToLogicalPlan →
-	// SemijoinInsertOnPlan.
+	// Pipeline: Resimplify → MarkAggPushdown → OJTToLogicalPlan →
+	// SemijoinInsertOnPlan. Aggregation-driven root anchoring is already
+	// enforced by OuterYanDP, so the OJT seen here is order-correct.
 	Resimplify(tree);
 
-	// OrderFixApply requires the root-aggregation classification; the caller
-	// of OuterYanPost::Optimize that has access to OuterYanTree's
-	// `root_aggregation.type` should invoke OrderFixApply explicitly OR we
-	// can derive `is_aggregation_query` here from tree.root_aggregation.
-	const bool is_aggregation_query = tree.root_aggregation.type != OuterYanAggregationType::NONE;
-	OrderFixApply(tree, is_aggregation_query);
+	// Record the per-edge aggregate-pushdown gate while the OJT is still
+	// live. Must run before OJTToLogicalPlan because the marker reads
+	// `OJTEdge::has_pk_fk_constraint` / `parent_relation_id` / `order` off
+	// the OJT.
+	MarkAggPushdown(tree);
 
 	// Lower the OJT to a fresh LogicalPlan. After this call, `tree.ojt` and
 	// `tree.source_plan` are released — only `tree.{bottom_up_pairs,
-	// top_down_pairs, table_to_relation}` remain valid for SJ insertion.
+	// top_down_pairs, table_to_relation, agg_pushdown_decisions}` remain
+	// valid for SJ insertion and downstream aggregate pushdown.
 	auto plan = tree.OJTToLogicalPlan(context);
 
 	// Final pass: splice LogicalSJBuild + LogicalSJProbe wraps based on the
@@ -44,11 +45,11 @@ void OuterYanPost::Resimplify(OuterYanTree &tree) {
 	resimplification.Apply(tree.OJT());
 }
 
-void OuterYanPost::OrderFixApply(OuterYanTree &tree, bool is_aggregation_query) {
+void OuterYanPost::MarkAggPushdown(OuterYanTree &tree) {
 	if (!tree.HasOJT()) {
-		throw InternalException("OuterYanPost::OrderFixApply: tree has no OJT");
+		throw InternalException("OuterYanPost::MarkAggPushdown: tree has no OJT");
 	}
-	order_fix.Apply(tree.OJT(), is_aggregation_query);
+	agg_pushdown.Apply(tree);
 }
 
 unique_ptr<LogicalOperator> OuterYanPost::SemijoinInsertOnPlan(unique_ptr<LogicalOperator> plan,

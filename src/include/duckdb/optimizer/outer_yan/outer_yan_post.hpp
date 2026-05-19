@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "duckdb/optimizer/outer_yan/evaluation_order.hpp"
+#include "duckdb/optimizer/outer_yan/agg_pushdown.hpp"
 #include "duckdb/optimizer/outer_yan/outer_yan_tree.hpp"
 #include "duckdb/optimizer/outer_yan/resimplification.hpp"
 #include "duckdb/optimizer/outer_yan/semijoin_insertion.hpp"
@@ -20,16 +20,24 @@ class ClientContext;
 //! OuterYanPost — third OuterYan pass (runs after OuterYanDP).
 //!
 //! `Optimize` consumes the OJT produced by OuterYanDP, runs the OJT-stage
-//! transforms, lowers to LogicalPlan via OJTToLogicalPlan, and as a final
-//! step splices in LogicalSJBuild / LogicalSJProbe operators based on the
-//! pre-decided pair lists on `OuterYanTree`.
+//! transforms, records the aggregate-pushdown decision vector, lowers to
+//! LogicalPlan via OJTToLogicalPlan, and as a final step splices in
+//! LogicalSJBuild / LogicalSJProbe operators based on the pre-decided pair
+//! lists on `OuterYanTree`.
 //!
-//! Step order (NEW per plan 3 — SJ insertion now runs on the rebuilt plan,
-//! not on the OJT):
+//! Step order:
 //!   1. Resimplify           — outer→original via arrow-side + eval-order.
-//!   2. OrderFixApply        — verify / enforce evaluation order on OJT.
+//!   2. MarkAggPushdown      — record per-edge `OuterYanAggPushdownDecision`
+//!                             on the OJT (Slice 1 of plan 4: relation-level
+//!                             PK-FK gate; threshold check deferred to the
+//!                             plan-side `AggregatePushdownOuter`).
 //!   3. OJTToLogicalPlan     — (shared utility) rebuild the LogicalPlan.
 //!   4. SemijoinInsertOnPlan — wrap LogicalGets with SJBuild + SJProbe.
+//!
+//! The former `OrderFixApply` step is gone: aggregation-driven root anchoring
+//! is now enforced upstream by `OuterYanDP` (`FIX_ALL_OUTPUTS` /
+//! `FIX_ONE_OUTPUT` regimes), so the OJT handed to this pass already carries
+//! the correct evaluation order.
 //!
 //! Skipped entirely when the OuterYan-active flag is false.
 class OuterYanPost {
@@ -42,7 +50,9 @@ public:
 	unique_ptr<LogicalOperator> Optimize(OuterYanTree &tree);
 
 	void Resimplify(OuterYanTree &tree);
-	void OrderFixApply(OuterYanTree &tree, bool is_aggregation_query);
+	//! Populate `tree.agg_pushdown_decisions` for later consumption by
+	//! `AggregatePushdownOuter` on the rebuilt plan.
+	void MarkAggPushdown(OuterYanTree &tree);
 	//! Splice LogicalSJBuild / LogicalSJProbe onto the rebuilt LogicalPlan
 	//! using `tree.{bottom_up_pairs, top_down_pairs}`. Plan 3 contract — the
 	//! pass runs on the rebuilt plan, not on the OJT.
@@ -52,7 +62,7 @@ private:
 	ClientContext &context;
 	Resimplification resimplification;
 	SemijoinInsertion semijoin_insertion;
-	OrderFix order_fix;
+	AggPushdown agg_pushdown;
 };
 
 } // namespace duckdb

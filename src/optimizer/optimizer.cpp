@@ -271,7 +271,7 @@ void Optimizer::RunBuiltInOptimizers() {
 		});
 
 		RunOptimizer(OptimizerType::AGGREGATE_PUSHDOWN_OUTER, [&]() {
-			AggregatePushdownOuter aggregate_pushdown_outer(binder, context);
+			AggregatePushdownOuter aggregate_pushdown_outer(*this, outer_yan_tree);
 			plan = aggregate_pushdown_outer.Optimize(std::move(plan));
 		});
 	} else {
